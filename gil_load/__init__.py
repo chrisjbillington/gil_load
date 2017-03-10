@@ -4,4 +4,4 @@ try:
 except ImportError:
     __version__ = None
 
-__all__ == ["init", "get"]
+__all__ = ["init", "get"]

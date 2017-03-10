@@ -2,4 +2,7 @@ dist/
 build/
 MANIFEST
 gil_load/__version__.py
+gil_load/__pycache__/
 test.py
+*.c
+*.pyc
