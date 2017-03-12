@@ -6,3 +6,6 @@ gil_load/__pycache__/
 test.py
 *.c
 *.pyc
+*.bak
+*.so
+*.html
