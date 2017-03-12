@@ -3,6 +3,8 @@ import os
 import threading
 import ctypes
 cimport cython
+from cpython.version cimport PY_MAJOR_VERSION
+from cpython.pystate cimport PyThreadState_Get, PyThreadState
 from libc.errno cimport ETIMEDOUT
 from libc.stdlib cimport malloc, free
 from libc.stdio cimport printf, fprintf, FILE, fdopen, fflush
@@ -39,9 +41,17 @@ cdef extern from "stdlib.h":
     int srand48(int) nogil
 
 
-# The pointer to the GIL. It's a static int called gil_locked in
-# ceval_gil.h that is either 1 or 0 depending on whether the GIL is held.
+# The pointer to the GIL. Different variables depending on Python 2 or 3:
+
+# In Python 3 it's a static int called gil_locked in ceval_gil.h that is
+# either 1 or 0 depending on whether the GIL is held.
 cdef int * gil_locked = NULL
+
+# In Python 2 it's a static PyThreadState pointer called
+# _PyThreadState_Current in pystate.c that points to the current ThreadState
+# or is NULL depending on whether the GIL is held.
+cdef PyThreadState * * _PyThreadState_Current = NULL
+
 
 # The fraction of the time the GIL has been held:
 cdef double gil_load = 0
@@ -57,8 +67,10 @@ monitoring_thread = None
 # A lock to make the functions in this module threadsafe
 lock = threading.Lock()
 
-
-cdef int LITTLE_ENDIAN = sys.byteorder == 'little'
+cdef int PY2 = PY_MAJOR_VERSION == 2
+cdef int PY3 = PY_MAJOR_VERSION == 3
+if not (PY2 or PY3):
+    raise ImportError("Only compatible with Python 2 or 3")
 
 
 # A flag to tell the monitoring thread to stop, and an associated condition
@@ -71,7 +83,10 @@ cdef pthread_mutex_t mutex
 
 cdef int gil_held() nogil:
     """Return whether the GIL is held by some thread"""
-    return gil_locked[0]
+    if PY3:
+        return gil_locked[0]
+    else:
+        return _PyThreadState_Current[0] != NULL
 
 
 cdef void mktimestamp(char* s) nogil:
@@ -93,8 +108,8 @@ cdef int sleep(double seconds) nogil:
     cdef int BILLION = 1000000000
 
     clock_gettime(CLOCK_MONOTONIC, &abstimeout)
-    abstimeout.tv_sec += <time_t>seconds
-    abstimeout.tv_nsec += <long>((seconds % 1) * BILLION)
+    abstimeout.tv_sec += <time_t> seconds
+    abstimeout.tv_nsec += <long> ((seconds % 1) * BILLION)
     if abstimeout.tv_nsec > BILLION:
         abstimeout.tv_sec += 1
         abstimeout.tv_nsec -= BILLION
@@ -123,37 +138,75 @@ def _get_data_segment():
         raise RuntimeError("Can't find data segment")
 
 
-cdef int * get_gil_pointer() except NULL:
+def _find_gil():
     """diff the data segment of memory against itself with the GIL held vs not
-    held. The memory location that changes is the location of the gil_locked
-    variable. Return a pointer to it"""
-    cdef long start
-    cdef long size
+    held to find the data describing whether the GIL is held. This is
+    different in Python 2 vs Python 3, so we find a different variable in each
+    case, gil_locked for Python 3 and _PyThreadState_Current for Python 2, and
+    we set a global variable equal to a pointer to one of those."""
+    cdef long start, size
     start, size = _get_data_segment()
-    cdef char *data_segment = <char *>start
-    cdef char *data_segment_nogil = <char *>malloc(size)
-    cdef long i
+        
+    cdef char *data_segment = <char *> start
+    cdef char *data_segment_nogil = <char *> malloc(size)
 
-    if threading.active_count() > 1:
-        raise RuntimeError("gil_load.init() must be called prior to other "
-                           "threads being started")
+    cdef int rc
 
     ctypes.pythonapi.PyEval_InitThreads()
 
     with nogil:
         memcpy(data_segment_nogil, data_segment, size)
-    for i in range(size):
-        if data_segment[i] != data_segment_nogil[i]:
-            free(data_segment_nogil)
-            # We've found the least significant byte, so whether it is the
-            # first byte in the int depends on the system byte order:
-            if LITTLE_ENDIAN:
-                return <int*> &data_segment[i]
-            else:
-                return <int*> &data_segment[i + 1 - sizeof(int)]
+
+    if PY3:
+        rc = _find_gil_py3(data_segment, data_segment_nogil, size)
     else:
-        raise RuntimeError("Failed to find gil in memory")
-    
+        rc = _find_gil_py2(data_segment, data_segment_nogil, size)
+
+    free(data_segment_nogil)
+
+    if rc != 0:
+        raise RuntimeError("Failed to find pointer to GIL variable")
+
+
+cdef int _find_gil_py3(char * data_segment, char * data_segment_nogil, long size):
+    """Compare data_segment and data_segment_nogil to find the variable
+    gil_locked. It will be the memory location that changes from int 1 to int
+    0 when the GIL is held vs not held. Set our global variable gil_locked to
+    be a pointer to it and return 0, or return -1 if it was not found"""
+    global gil_locked
+
+    # Don't read past the end of the memory segment:
+    cdef long stop = size - sizeof(int) - 1
+
+    cdef long i
+    for i in range(stop):
+        if (<int *> &data_segment[i])[0] == 1 and (<int *> &data_segment_nogil[i])[0] == 0:
+            gil_locked = <int *> &data_segment[i]
+            return 0
+    return -1
+
+
+cdef int _find_gil_py2(char * data_segment, char * data_segment_nogil, long size):
+    """Compare data_segment and data_segment_nogil to find the variable
+    _PyThreadState_Current. It will be the memory location that changes from a
+    pointer to the current ThreadState to a NULL pointer when the GIL is held
+    vs not held. Set our global variable _PyThreadState_Current to be a
+    pointer to it and return 0, or return -1 if it was not found"""
+    global _PyThreadState_Current
+
+    # Don't read past the end of the memory segment:
+    cdef long stop = size - sizeof(PyThreadState *) - 1
+
+    cdef PyThreadState * threadstate = PyThreadState_Get()
+
+    cdef long i
+    for i in range(stop):
+        if ((<PyThreadState * *> &data_segment[i])[0] == threadstate and 
+            (<PyThreadState * *> &data_segment_nogil[i])[0] == NULL):
+            _PyThreadState_Current = <PyThreadState * *> &data_segment[i]
+            return 0
+    return -1
+
 
 @cython.cdivision(True)
 def _run(double av_sample_interval, double output_interval, output_file):
@@ -189,7 +242,7 @@ def _run(double av_sample_interval, double output_interval, output_file):
             held = gil_held()
             held_count += held
             check_count += 1
-            gil_load = <double>held_count/<double>check_count
+            gil_load = <double> held_count / <double> check_count
             if check_count * av_sample_interval > 60:
                 gil_load_1m = k_1 * held + (1 - k_1) * gil_load_1m
             else:
@@ -213,8 +266,9 @@ def _run(double av_sample_interval, double output_interval, output_file):
 
 
 def _checkinit():
-    if gil_locked == NULL:
+    if (PY3 and gil_locked == NULL) or (PY2 and _PyThreadState_Current == NULL):
         raise RuntimeError("Must call gil_load.init() first")
+
 
 def init():
     """Find the data structure for the GIL in memory so that we can monitor it
@@ -225,10 +279,14 @@ def init():
     from this, as the Python interpreter is not quite as efficient in
     multithreaded mode as it is in single-threaded mode, even if there is only
     one thread running."""
-    # Get a pointer to the GIL and store it as a global variable:
-    global gil_locked
+
+    if threading.active_count() > 1:
+        raise RuntimeError("gil_load.init() must be called prior to other "
+                           "threads being started")
+
     with lock:
-        gil_locked = <int *> get_gil_pointer()
+        # Get a pointer to the GIL and store it as a global variable:
+        _find_gil()
 
     # Set up condition and mutex for telling the monitoring thread when to stop:
     cdef pthread_condattr_t condattr
@@ -266,8 +324,8 @@ def start(av_sample_interval=0.05, output_interval=5, output=None, reset_counts=
         if monitoring_thread is not None:
             raise RuntimeError("GIL monitoring already started")
         monitoring_thread = threading.Thread(target=_run,
-                                             args=(av_sample_interval, output_interval, output),
-                                             daemon=True)
+                                             args=(av_sample_interval, output_interval, output))
+        monitoring_thread.daemon = True
         monitoring_thread.start()
 
 
