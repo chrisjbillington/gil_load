@@ -27,6 +27,7 @@ cdef extern from "pthread.h" nogil:
     int pthread_cond_init(pthread_cond_t *, pthread_condattr_t *)
     int pthread_cond_signal(pthread_cond_t *)
     int pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, timespec *)
+    int pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *)
 
     int pthread_condattr_init(pthread_condattr_t *)
     int pthread_condattr_setclock(pthread_condattr_t *, clockid_t)
@@ -98,26 +99,22 @@ cdef void mktimestamp(char* s) nogil:
     strftime(s, 26, "[%Y-%m-%d %H:%M:%S]", &tm_info)
 
 
-cdef int sleep(double seconds) nogil:
-    """Sleep for a time in seconds or return immediately if seconds <= 0.
-   Other threads can interrupt the sleep by acquiring the mutex, setting
-   stopping = 1 and then calling pthread_cond_signal(cond). The caller of this
-   function must have acquired the mutex. Returns 1 if sleep was interrupted,
-   and zero otherwise."""
-    cdef timespec abstimeout
+cdef timespec abstimeout(double seconds) nogil:
+    """Return the absolute time for a given number of seconds from now, using
+    CLOCK MONOTONIC"""
+    cdef timespec timeout
     cdef int BILLION = 1000000000
 
-    clock_gettime(CLOCK_MONOTONIC, &abstimeout)
-    abstimeout.tv_sec += <time_t> seconds
-    abstimeout.tv_nsec += <long> ((seconds % 1) * BILLION)
-    if abstimeout.tv_nsec > BILLION:
-        abstimeout.tv_sec += 1
-        abstimeout.tv_nsec -= BILLION
+    clock_gettime(CLOCK_MONOTONIC, &timeout)
 
-    while not stopping:
-        if pthread_cond_timedwait(&cond, &mutex, &abstimeout) == ETIMEDOUT:
-            return 0
-    return 1
+    timeout.tv_sec += <time_t> seconds
+    timeout.tv_nsec += <long> ((seconds % 1) * BILLION)
+
+    if timeout.tv_nsec > BILLION:
+        timeout.tv_sec += 1
+        timeout.tv_nsec -= BILLION
+
+    return timeout
 
 
 def _get_data_segment():
@@ -211,6 +208,7 @@ cdef int _find_gil_py2(char * data_segment, char * data_segment_nogil, long size
 @cython.cdivision(True)
 def _run(double av_sample_interval, double output_interval, output_file):
     """"""
+    global stopping
     global gil_load
     global gil_load_1m
     global gil_load_5m
@@ -234,35 +232,42 @@ def _run(double av_sample_interval, double output_interval, output_file):
 
     cdef char timestamp[26]
 
+    cdef timespec timeout
+
     srand48(time(NULL))
 
     with nogil:
         pthread_mutex_lock(&mutex)
-        while not sleep(-av_sample_interval * log(drand48())):
-            held = gil_held()
-            held_count += held
-            check_count += 1
-            gil_load = <double> held_count / <double> check_count
-            if check_count * av_sample_interval > 60:
-                gil_load_1m = k_1 * held + (1 - k_1) * gil_load_1m
-            else:
-                gil_load_1m = gil_load
-            if check_count * av_sample_interval > 5 * 60:
-                gil_load_5m = k_5 * held + (1 - k_5) * gil_load_5m
-            else:
-                gil_load_5m = gil_load
-            if check_count * av_sample_interval > 15 * 60:
-                gil_load_15m = k_15 * held + (1 - k_15) * gil_load_15m
-            else:
-                gil_load_15m = gil_load
-            if check_count == next_output_count:
-                next_output_count += output_count_interval
-                if output:
-                    mktimestamp(timestamp)
-                    fprintf(f, "%s  GIL load: %.2f (%.2f, %.2f, %.2f)\n",
-                            timestamp, gil_load,
-                            gil_load_1m, gil_load_5m, gil_load_15m)
-                    fflush(f)
+        while not stopping:
+            timeout = abstimeout(-av_sample_interval * log(drand48()))
+            if pthread_cond_timedwait(&cond, &mutex, &timeout) == ETIMEDOUT:
+                held = gil_held()
+                held_count += held
+                check_count += 1
+                gil_load = <double> held_count / <double> check_count
+                if check_count * av_sample_interval > 60:
+                    gil_load_1m = k_1 * held + (1 - k_1) * gil_load_1m
+                else:
+                    gil_load_1m = gil_load
+                if check_count * av_sample_interval > 5 * 60:
+                    gil_load_5m = k_5 * held + (1 - k_5) * gil_load_5m
+                else:
+                    gil_load_5m = gil_load
+                if check_count * av_sample_interval > 15 * 60:
+                    gil_load_15m = k_15 * held + (1 - k_15) * gil_load_15m
+                else:
+                    gil_load_15m = gil_load
+                if check_count == next_output_count:
+                    next_output_count += output_count_interval
+                    if output:
+                        mktimestamp(timestamp)
+                        fprintf(f, "%s  GIL load: %.2f (%.2f, %.2f, %.2f)\n",
+                                timestamp, gil_load,
+                                gil_load_1m, gil_load_5m, gil_load_15m)
+                        fflush(f)
+        stopping = 0
+        pthread_cond_signal(&cond)
+        pthread_mutex_unlock(&mutex)
 
 
 def _checkinit():
@@ -341,9 +346,10 @@ def stop():
         pthread_mutex_lock(&mutex)
         stopping = 1
         pthread_cond_signal(&cond)
+        while stopping:
+            pthread_cond_wait(&cond, &mutex)
         pthread_mutex_unlock(&mutex)
         monitoring_thread.join()
-        stopping = 0
         monitoring_thread = None
 
 
