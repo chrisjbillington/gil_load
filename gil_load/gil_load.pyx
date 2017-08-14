@@ -117,23 +117,17 @@ cdef timespec abstimeout(double seconds) nogil:
     return timeout
 
 
-def _get_data_segment():
-    """Get the data segment of process memory, in which gil_locked is
-    located"""
+def _get_data_segments():
+    """Get all possible data segments of process memory, in which the variable
+    for the GIL might be located"""
     with open('/proc/{}/maps'.format(os.getpid())) as f:
         # Dymanically linked?
         for line in f:
-            if 'libpython' in line and 'rw-p' in line:
+            if line.split()[1] == 'rw-p':
+                if 'gil_load' in line or '[heap]' in line or '[stack]' in line:
+                    continue
                 start, stop = [int(s, 16) for s in line.split()[0].split('-')]
-                return start, stop-start
-        # Statically linked?
-        f.seek(0)
-        for line in f:
-            if sys.executable in line and 'rw-p' in line:
-                start, stop = [int(s, 16) for s in line.split()[0].split('-')]
-                return start, stop-start
-        raise RuntimeError("Can't find data segment")
-
+                yield start, stop-start
 
 def _find_gil():
     """diff the data segment of memory against itself with the GIL held vs not
@@ -142,27 +136,34 @@ def _find_gil():
     case, gil_locked for Python 3 and _PyThreadState_Current for Python 2, and
     we set a global variable equal to a pointer to one of those."""
     cdef long start, size
-    start, size = _get_data_segment()
-        
-    cdef char *data_segment = <char *> start
-    cdef char *data_segment_nogil = <char *> malloc(size)
+    cdef char *data_segment
+    cdef char *data_segment_nogil
 
-    cdef int rc
+    cdef int rc = 0
 
     ctypes.pythonapi.PyEval_InitThreads()
 
-    with nogil:
-        memcpy(data_segment_nogil, data_segment, size)
+    cdef PyThreadState * threadstate = PyThreadState_Get()
 
-    if PY3:
-        rc = _find_gil_py3(data_segment, data_segment_nogil, size)
-    else:
-        rc = _find_gil_py2(data_segment, data_segment_nogil, size)
+    cdef int i
 
-    free(data_segment_nogil)
+    for start, size in _get_data_segments():
+        data_segment = <char *> start
+        data_segment_nogil = <char *> malloc(size)
+        with nogil:
+            memcpy(data_segment_nogil, data_segment, size)
 
-    if rc != 0:
-        raise RuntimeError("Failed to find pointer to GIL variable")
+        if PY3:
+            rc = _find_gil_py3(data_segment, data_segment_nogil, size)
+        else:
+            rc = _find_gil_py2(data_segment, data_segment_nogil, size)
+
+        free(data_segment_nogil)
+
+        if rc == 0:
+            return
+
+    raise RuntimeError("Failed to find pointer to GIL variable")
 
 
 cdef int _find_gil_py3(char * data_segment, char * data_segment_nogil, long size):

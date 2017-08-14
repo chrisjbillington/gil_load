@@ -4,7 +4,7 @@ from distutils.extension import Extension
 from Cython.Build import cythonize
 
 
-VERSION = '0.2.1'
+VERSION = '0.3.0'
 
 # Auto generate a __version__ package for the package to import
 with open(os.path.join('gil_load', '__version__.py'), 'w') as f:
