@@ -7,7 +7,7 @@ on Python 2.7, 3.5 and 3.6
   * [Installation](#installation)
   * [Introduction](#introduction)
   * [Usage](#usage)
-  * [Function Documentation](#function documentation)
+  * [Functions](#functions)
 
 
 ## Installation
