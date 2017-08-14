@@ -34,6 +34,53 @@ is more often than not without merit.
 
 ## Example usage
 
+```python
+import numpy as np
+import threading
+import gil_load
+
+
+x = np.random.randn(4096, 4096)
+y = np.random.randn(4096, 4096)
+
+def inplace_fft(a):
+    a[:] = np.fft.fft2(a).real
+
+
+gil_load.init()
+gil_load.start()
+
+thread1 = threading.Thread(target=inplace_fft, args=(x,))
+thread2 = threading.Thread(target=inplace_fft, args=(y,))
+
+thread1.start()
+thread2.start()
+
+thread1.join()
+thread2.join()
+
+gil_load.stop()
+
+print(gil_load.get(N=4))
+
+```
+
+This prints:
+
+```
+(0.0, [0.0, 0.0, 0.0])
+```
+
+Which means that the mean fraction of the time the GIL was held, as well as
+the 1 minute, 5 minute and 15 minute averages (not really relevant since the
+code was running only for a few seconds) was zero to four digits. In fact, the
+code that samples whether the GIL is held every 50ms probably never
+encountered it being held in this code, because the numpy code was never
+holding the GIL, so even though the code takes several seconds to run, the
+only opportunity for the GIL to be detected as held is during the thread
+starting and stopping.
+
+So if your code looks like this, don't worry about the GIL. It's not your problem.
 
 ## Documentation
 
