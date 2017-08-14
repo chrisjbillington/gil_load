@@ -7,7 +7,7 @@ on Python 2.7, 3.5 and 3.6
   * [Installation](#installation)
   * [Introduction](#introduction)
   * [Usage](#usage)
-  * [Notes](#notes)
+  * [Function Documentation](#function documentation)
 
 
 ## Installation
@@ -32,7 +32,7 @@ A lot of people complain about the Python GIL, saying that it prevents them
 from utilising all cores on their expensive CPUs. In my experience this claim
 is more often than not without merit.
 
-## Example usage
+## Usage
 
 ```python
 import numpy as np
@@ -82,13 +82,13 @@ starting and stopping.
 
 So if your code looks like this, don't worry about the GIL. It's not your problem.
 
-## Documentation
+## Function documentation
 
 `test()` :
 
-test that the code can in fact determine whether the GIL is held
-for your Python interpreter. Raises `AssertionError` on failure, does nothing
-on success.
+test that the code can in fact determine whether the GIL is held for your
+Python interpreter. Raises `AssertionError` on failure, returns True on
+success. Must be called after `init()`.
 
 `init()` :
 
@@ -117,7 +117,9 @@ clear the counts, then you can repeatedly sample the GIL usage of just a small
 segment of your code by wrapping it with calls to `start()` and `stop()`. Due
 to the exponential distribution of sampling intervals, this will accumulate
 accurate statistics even if the time the function takes to run is less than
-`av_sample_interval`.
+`av_sample_interval`. However, each call to start() does involve the starting of
+a new thread, the overhead of which may make profiling very short segments of
+code innacurate.
 
 `stop()`:
 
