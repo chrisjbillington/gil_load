@@ -5,7 +5,7 @@ from setuptools.extension import Extension
 
 from distutils.version import LooseVersion
 
-VERSION = '0.3.3'
+VERSION = '0.3.4'
 
 # Auto generate a __version__ package for the package to import
 with open(os.path.join('gil_load', '__version__.py'), 'w') as f:
@@ -28,7 +28,12 @@ if USE_CYTHON:
 else:
     ext = '.c'
 
-ext_modules = [Extension('gil_load.gil_load', ["gil_load/gil_load" + ext])]
+# Required for glibc < 2.17:
+extra_compile_args = ["-lrt"]
+
+ext_modules = [Extension('gil_load.gil_load',
+                         ["gil_load/gil_load" + ext],
+                         extra_compile_args=extra_compile_args)]
 
 if USE_CYTHON:
     from Cython.Build import cythonize
