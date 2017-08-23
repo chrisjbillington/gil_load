@@ -26,6 +26,8 @@ $ sudo python3 setup.py install
 
 `gil_load` can also be installed with Python 2.
 
+Note: `cython >= 0.22` is required to install `gil_load`.
+
 ## Introduction
 
 A lot of people complain about the Python GIL, saying that it prevents them
