@@ -1,37 +1,39 @@
+import sys
 import os
 from setuptools import setup
 from setuptools.extension import Extension
 
 from distutils.version import LooseVersion
 
-try:
-    import cython
-except ImportError:
-    msg = ('cython required. Cython can be installed with:\n' +
-           '   sudo pip install cython\n' +
-           'or from your OS\'s package manager')
-    raise ImportError(msg)
-
-if LooseVersion(cython.__version__) < LooseVersion('0.22.0'):
-    msg = ('cython >= 0.22 required. Cython can be upgraded with:\n' +
-           '   sudo pip install --upgrade cython.\n' +
-           'On some systems this will not take precendent over a ' +
-           'version of cython that was installed from the OS\'s package manager. ' +
-           'In these cases you should consider removing the version of cython ' +
-           'that was installed by your OS\'s package manager.')
-    raise ValueError(msg)
-
-from Cython.Build import cythonize
-
-VERSION = '0.3.1'
+VERSION = '0.3.3'
 
 # Auto generate a __version__ package for the package to import
 with open(os.path.join('gil_load', '__version__.py'), 'w') as f:
     f.write("__version__ = '%s'\n"%VERSION)
 
-ext_modules = [Extension('gil_load.gil_load', ["gil_load/gil_load.pyx"])]
+# Use cython to cythonize the extensions, but if the .c file is already
+# distributed with sdist, use it and don't require users to have cython:
+USE_CYTHON = False
+if '--use-cython' in sys.argv:
+    USE_CYTHON = True
+    sys.argv.remove('--use-cython')
+if 'sdist' in sys.argv:
+    USE_CYTHON = True
 
+if USE_CYTHON:
+    import cython
+    if LooseVersion(cython.__version__) < LooseVersion('0.22.0'):
+        raise ValueError('cython >= 0.22 required')
+    ext = '.pyx'
+else:
+    ext = '.c'
 
+ext_modules = [Extension('gil_load.gil_load', ["gil_load/gil_load" + ext])]
+
+if USE_CYTHON:
+    from Cython.Build import cythonize
+    ext_modules = cythonize(ext_modules)
+    
 setup(
     name = 'gil_load',
     version=VERSION,
@@ -41,5 +43,5 @@ setup(
     url='https://github.com/chrisjbillington/gil_load',
     license="BSD",
     packages=['gil_load'],
-    ext_modules = cythonize(ext_modules)
+    ext_modules = ext_modules
 )

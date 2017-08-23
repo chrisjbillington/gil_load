@@ -21,12 +21,15 @@ $ sudo pip3 install gil_load
 or to install from source:
 
 ```
-$ sudo python3 setup.py install
+$ sudo python3 setup.py install --use-cython
 ```
 
-`gil_load` can also be installed with Python 2.
+Installing from source requires `cython >= 0.22` to generate the `.c`
+file from the `.pyx` cython extension before compiling and installing. This is
+not necessary if installing with pip, since the `.c` extension file is already
+included in the version uploaded to PyPI.
 
-Note: `cython >= 0.22` is required to install `gil_load`.
+`gil_load` can also be installed with Python 2.
 
 ## Introduction
 
