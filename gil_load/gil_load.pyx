@@ -1,8 +1,10 @@
+from __future__ import absolute_import
 import sys
 import os
 import threading
 import ctypes
 cimport cython
+from ctypes import cdll
 from cpython.version cimport PY_MAJOR_VERSION
 from cpython.pystate cimport PyThreadState_Get, PyThreadState
 from libc.errno cimport ETIMEDOUT
@@ -19,9 +21,13 @@ cdef extern from "pthread.h" nogil:
         pass
     ctypedef struct pthread_mutex_t:
         pass
+    ctypedef struct pthread_barrier_t:
+        pass
     ctypedef struct pthread_condattr_t:
         pass
     ctypedef struct pthread_mutexattr_t:
+        pass
+    ctypedef struct pthread_barrierattr_t:
         pass
 
     int pthread_cond_init(pthread_cond_t *, pthread_condattr_t *)
@@ -36,10 +42,35 @@ cdef extern from "pthread.h" nogil:
     int pthread_mutex_lock(pthread_mutex_t *)
     int pthread_mutex_unlock(pthread_mutex_t *)
 
+    int pthread_barrier_init(pthread_barrier_t *, pthread_barrierattr_t *, unsigned int count)
+    int pthread_barrier_wait(pthread_barrier_t *)
+
 
 cdef extern from "stdlib.h":
     double drand48() nogil
     int srand48(int) nogil
+
+
+# Load preload.so using ctypes and provide the file path as a global variable
+# so others can import it. To work correctly, this must not be the first time
+# the library is loaded - it must be in LD_PRELOAD, hence the name. But we
+# need to call one of its functions at some point.
+
+def get_preload_path():
+    import gil_load
+    from distutils.sysconfig import get_config_var
+    this_dir = os.path.dirname(os.path.realpath(gil_load.__file__))
+    so_name = os.path.join(this_dir, 'preload')
+
+    ext_suffix = get_config_var('EXT_SUFFIX')
+    if ext_suffix is not None:
+        so_name += ext_suffix
+    else:
+        so_name += '.so'
+    return so_name
+    
+preload_path = get_preload_path()
+preload_lib = cdll.LoadLibrary(preload_path)  
 
 
 # The pointer to the GIL. Different variables depending on Python 2 or 3:
@@ -80,6 +111,9 @@ if not (PY2 or PY3):
 cdef int stopping = 0
 cdef pthread_cond_t cond
 cdef pthread_mutex_t mutex
+
+# A barrier for other synchronisation:
+cdef pthread_barrier_t barrier
 
 
 cdef int gil_held() nogil:
@@ -301,6 +335,40 @@ def init():
     pthread_cond_init(&cond, &condattr)
     pthread_mutex_init(&mutex, NULL)
 
+
+
+    # def foo():
+    #     with nogil:
+    #         # Wait for neither of us to have the GIL:
+    #         pthread_barrier_wait(&barrier)
+    #         # Wait for the main thread to have the GIL:
+    #         pthread_barrier_wait(&barrier)
+    #     pthread_barrier_wait(&barrier)
+    #     printf('thread has the GIL\n')
+
+    # cdef pthread_barrierattr_t barrierattr
+    # pthread_barrier_init(&barrier, &barrierattr, 2)
+
+    # threading.Thread(target=foo).start()
+    # with nogil:
+    #     # Let's make sure we get to a point whether neither of us have the GIL
+    #     pthread_barrier_wait(&barrier)
+    #     printf('nobody has the GIL\n')
+    # # Now let's ensure we have the GIL and the thread does not:
+    # pthread_barrier_wait(&barrier)
+    # printf('main has the GIL\n')
+
+    printf('gil held\n')
+    with nogil:
+        printf('gil released\n')
+    printf('gil reacquired\n')
+
+    preload_lib.set_initialised()
+
+    printf('gil held\n')
+    with nogil:
+        printf('gil released\n')
+    printf('gil reacquired\n')
 
 def start(av_sample_interval=0.05, output_interval=5, output=None, reset_counts=False):
 

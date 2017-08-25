@@ -5,7 +5,7 @@ from setuptools.extension import Extension
 
 from distutils.version import LooseVersion
 
-VERSION = '0.3.4'
+VERSION = '0.3.5'
 
 # Auto generate a __version__ package for the package to import
 with open(os.path.join('gil_load', '__version__.py'), 'w') as f:
@@ -29,11 +29,14 @@ else:
     ext = '.c'
 
 # Required for glibc < 2.17:
-extra_compile_args = ["-lrt"]
+extra_link_args = ["-lrt"]
 
 ext_modules = [Extension('gil_load.gil_load',
-                         ["gil_load/gil_load" + ext],
-                         extra_compile_args=extra_compile_args)]
+                         ['gil_load/gil_load' + ext],
+                         extra_link_args=extra_link_args),
+               Extension('gil_load.preload',
+                         ['gil_load/preload.c'],
+                         extra_link_args=['-ldl'])]
 
 if USE_CYTHON:
     from Cython.Build import cythonize

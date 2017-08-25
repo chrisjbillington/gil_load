@@ -4,7 +4,7 @@ MANIFEST
 gil_load/__version__.py
 gil_load/__pycache__/
 test.py
-*.c
+gil_load/gil_load.c
 *.pyc
 *.bak
 *.so
