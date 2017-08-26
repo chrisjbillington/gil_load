@@ -25,8 +25,9 @@ static int initialised = 0;
 // blocking waiting for the GIL.
 static int threads_waiting[MAX_THREADS_TRACKED];
 static pthread_t threads[MAX_THREADS_TRACKED];
-// how many threads are being tracked:
-static int n_threads_tracked;
+// how many threads we have seen. Possible larger than the number we are
+// tracking if it exceeds MAX_THREADS_TRACKED::
+static int n_threads_seen;
 
 // A mutex for non-atomic operations on the above:
 static pthread_mutex_t threads_tracked_mutex;
@@ -46,8 +47,8 @@ void init(void){
 
 void register_new_thread(pthread_t thread){
     mutex_lock_internal(&threads_tracked_mutex);
-    thread_number = n_threads_tracked;
-    n_threads_tracked++;
+    thread_number = n_threads_seen;
+    n_threads_seen++;
     if(thread_number < MAX_THREADS_TRACKED){
         threads[thread_number] = thread;
         threads_waiting[thread_number] = 0;
@@ -144,9 +145,15 @@ int begin_sample(void){
     // 'threads_waiting' arrays. We acquire the mutex so that the number of
     // elements in the array is guaranteed to be correct and doesn't change
     // while this is occurring. The caller must call end_sample() to release
-    // the mutex when it is done.
+    // the mutex when it is done. We return the number of elements it is safe
+    // to read from the array.
     mutex_lock_internal(&threads_tracked_mutex);
-    return n_threads_tracked;
+    if (n_threads_seen < MAX_THREADS_TRACKED){
+        return n_threads_seen;
+    }
+    else{
+        return MAX_THREADS_TRACKED;
+    }
 }
 
 void end_sample(void){
