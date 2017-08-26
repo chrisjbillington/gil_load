@@ -14,6 +14,7 @@ from libc.string cimport memcpy
 from libc.math cimport log
 from libc.time cimport time, time_t, localtime, strftime, tm
 from posix.time cimport timespec, clockid_t, clock_gettime, CLOCK_MONOTONIC
+from posix.unistd cimport usleep, useconds_t
 
 cdef extern from "pthread.h" nogil:
 
@@ -50,28 +51,8 @@ cdef extern from "stdlib.h":
     double drand48() nogil
     int srand48(int) nogil
 
-
-# Load preload.so using ctypes and provide the file path as a global variable
-# so others can import it. To work correctly, this must not be the first time
-# the library is loaded - it must be in LD_PRELOAD, hence the name. But we
-# need to call one of its functions at some point.
-
-def get_preload_path():
-    import gil_load
-    from distutils.sysconfig import get_config_var
-    this_dir = os.path.dirname(os.path.realpath(gil_load.__file__))
-    so_name = os.path.join(this_dir, 'preload')
-
-    ext_suffix = get_config_var('EXT_SUFFIX')
-    if ext_suffix is not None:
-        so_name += ext_suffix
-    else:
-        so_name += '.so'
-    return so_name
-    
-preload_path = get_preload_path()
-preload_lib = cdll.LoadLibrary(preload_path)  
-
+cdef extern from "preload.h":
+    int set_initialised() nogil
 
 # The pointer to the GIL. Different variables depending on Python 2 or 3:
 
@@ -335,35 +316,18 @@ def init():
     pthread_cond_init(&cond, &condattr)
     pthread_mutex_init(&mutex, NULL)
 
-
-
-    # def foo():
-    #     with nogil:
-    #         # Wait for neither of us to have the GIL:
-    #         pthread_barrier_wait(&barrier)
-    #         # Wait for the main thread to have the GIL:
-    #         pthread_barrier_wait(&barrier)
-    #     pthread_barrier_wait(&barrier)
-    #     printf('thread has the GIL\n')
-
-    # cdef pthread_barrierattr_t barrierattr
-    # pthread_barrier_init(&barrier, &barrierattr, 2)
-
-    # threading.Thread(target=foo).start()
-    # with nogil:
-    #     # Let's make sure we get to a point whether neither of us have the GIL
-    #     pthread_barrier_wait(&barrier)
-    #     printf('nobody has the GIL\n')
-    # # Now let's ensure we have the GIL and the thread does not:
-    # pthread_barrier_wait(&barrier)
-    # printf('main has the GIL\n')
-
     printf('gil held\n')
     with nogil:
         printf('gil released\n')
     printf('gil reacquired\n')
 
-    preload_lib.set_initialised()
+    cdef int rc = set_initialised()
+    if rc != 0:
+        msg = ("preload library not loaded prior to starting Python. " + 
+              "gil_load requires a library to be preloaded with LD_PRELOAD." +
+              "run your script in the following way to preload the required library:\n\n" +
+              "LD_PRELOAD=$(python -m gil_load) python my_script.py")
+        raise RuntimeError(msg)
 
     printf('gil held\n')
     with nogil:
@@ -426,6 +390,13 @@ def get(N=2):
     """Returns the average GIL load, and the 1m, 5m and 15m averages, rounded to N digits"""
     _checkinit()
     return round(gil_load, N), [round(n, N) for n in (gil_load_1m, gil_load_5m, gil_load_15m)]
+
+
+def gil_usleep(useconds_t us_nogil, useconds_t us_withgil):
+    """usleep with the GIL not held, and then held, for testing purposes"""
+    with nogil:
+        usleep(us_nogil)
+    usleep(us_withgil)
 
 
 def test():

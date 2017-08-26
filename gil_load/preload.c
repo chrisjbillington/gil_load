@@ -15,9 +15,9 @@ static int (*mutex_unlock_internal)(pthread_mutex_t *mutex);
 static int (*sem_wait_internal)(sem_t *sem);
 
 // Py2:
-static sem_t * GIL_acq_sem;
+static sem_t * GIL_acq_sem = NULL;
 // Py3:
-static pthread_mutex_t * GIL_acq_mutex;
+static pthread_mutex_t * GIL_acq_mutex = NULL;
 
 // Whether we know which mutex or semaphore is being used to acquire the GIL:
 static int initialised = 0;
@@ -25,18 +25,10 @@ static int initialised = 0;
 
 void __attribute__ ((constructor)) init(void);
 void init(void){
-    // cond_timedwait_internal = dlvsym(RTLD_NEXT, "pthread_cond_wait", "GLIBC_2.3.2");
     sem_wait_internal = dlsym(RTLD_NEXT, "sem_wait");
     mutex_lock_internal = dlsym(RTLD_NEXT, "pthread_mutex_lock");
     mutex_unlock_internal = dlsym(RTLD_NEXT, "pthread_mutex_unlock");
 }
-
-// int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime){
-//     printf("%ld -> cond_timedwait: %p\n", pthread_self(), cond);
-//     int ret = cond_timedwait_internal(cond, mutex, abstime);
-//     printf("  %ld <- cond_timedwait: %p\n", pthread_self(), cond);
-//     return ret;
-// }
 
 int sem_wait(sem_t *sem){
     if (PY_MAJOR_VERSION == 2 && initialised == 0){
@@ -77,7 +69,14 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex){
     return ret;
 }
 
-void set_initialised(void){
+int set_initialised(void){
     printf("setting initialised\n");
     initialised = 1;
+    if (PY_MAJOR_VERSION == 3 && GIL_acq_mutex == NULL){
+        return 1;
+    }
+    if (PY_MAJOR_VERSION == 2 && GIL_acq_sem == NULL){
+        return 1;
+    }
+    return 0;
 }

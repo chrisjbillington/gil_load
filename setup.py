@@ -33,7 +33,8 @@ extra_link_args = ["-lrt"]
 
 ext_modules = [Extension('gil_load.gil_load',
                          ['gil_load/gil_load' + ext],
-                         extra_link_args=extra_link_args),
+                         extra_link_args=extra_link_args,
+                         include_dirs=['gil_load']),
                Extension('gil_load.preload',
                          ['gil_load/preload.c'],
                          extra_link_args=['-ldl'])]
