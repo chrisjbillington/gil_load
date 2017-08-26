@@ -26,7 +26,7 @@ static int initialised = 0;
 static int threads_waiting[MAX_THREADS_TRACKED];
 static pthread_t threads[MAX_THREADS_TRACKED];
 // how many threads are being tracked:
-static int threads_tracked;
+static int n_threads_tracked;
 
 // A mutex for non-atomic operations on the above:
 static pthread_mutex_t threads_tracked_mutex;
@@ -46,8 +46,8 @@ void init(void){
 
 void register_new_thread(pthread_t thread){
     mutex_lock_internal(&threads_tracked_mutex);
-    thread_number = threads_tracked;
-    threads_tracked++;
+    thread_number = n_threads_tracked;
+    n_threads_tracked++;
     if(thread_number < MAX_THREADS_TRACKED){
         threads[thread_number] = thread;
         threads_waiting[thread_number] = 0;
@@ -64,20 +64,25 @@ void mark_thread_waiting_for_gil(pthread_t thread){
         register_new_thread(thread);
     }
     if(thread_number < MAX_THREADS_TRACKED){
-        printf("%ld waiting for GIL\n", thread);
+        // printf("%ld waiting for GIL\n", thread);
         threads_waiting[thread_number] = 1;
     }
 }
 
 void mark_thread_done_waiting_for_gil(pthread_t thread){
     if(thread_number < MAX_THREADS_TRACKED){
-        printf("%ld got GIL\n", thread);
+        // printf("%ld got GIL\n", thread);
         threads_waiting[thread_number] = 0;
     }
 }
 
 int sem_wait(sem_t *sem){
     if (PY_MAJOR_VERSION == 2 && initialised == 0){
+        // gil_load.pyx will call set_initialised(), which sets initialised =
+        // 1, and it will do so immediately after a GIL acquisition. At that
+        // point the semaphore last stored here will be the one used when
+        // waiting for the GIL. So we just store every semaphore we see until
+        // we are told (via initialised = 1) that we've found the right one.
         GIL_acq_sem = sem;
     }
     if (PY_MAJOR_VERSION == 2 && initialised == 1 && GIL_acq_sem == sem){
@@ -100,6 +105,11 @@ int pthread_mutex_lock(pthread_mutex_t *mutex){
 
 int pthread_mutex_unlock(pthread_mutex_t *mutex){
     if (PY_MAJOR_VERSION == 3 && initialised == 0){
+        // gil_load.pyx will call set_initialised(), which sets initialised =
+        // 1, and it will do so immediately after a GIL acquisition. At that
+        // point the mutex last stored here will be the one used when waiting
+        // for the GIL. So we just store every mutex we see until we are told
+        // (via initialised = 1) that we've found the right one.
         GIL_acq_mutex = mutex;
     }
     if (PY_MAJOR_VERSION == 3 && initialised == 1 && GIL_acq_mutex == mutex){
@@ -118,4 +128,27 @@ int set_initialised(void){
         return 1;
     }
     return 0;
+}
+
+
+pthread_t * get_threads_arr(void){
+    return threads;
+}
+
+int * get_threads_waiting_arr(void){
+    return threads_waiting;
+}
+
+int begin_sample(void){
+    // Called when calling code wants to analyse the 'threads' and
+    // 'threads_waiting' arrays. We acquire the mutex so that the number of
+    // elements in the array is guaranteed to be correct and doesn't change
+    // while this is occurring. The caller must call end_sample() to release
+    // the mutex when it is done.
+    mutex_lock_internal(&threads_tracked_mutex);
+    return n_threads_tracked;
+}
+
+void end_sample(void){
+    pthread_mutex_unlock(&threads_tracked_mutex);
 }

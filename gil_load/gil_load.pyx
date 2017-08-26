@@ -18,6 +18,8 @@ from posix.unistd cimport usleep, useconds_t
 
 cdef extern from "pthread.h" nogil:
 
+    ctypedef long pthread_t
+
     ctypedef struct pthread_cond_t:
         pass
     ctypedef struct pthread_mutex_t:
@@ -31,6 +33,7 @@ cdef extern from "pthread.h" nogil:
     ctypedef struct pthread_barrierattr_t:
         pass
 
+    pthread_t pthread_self()
     int pthread_cond_init(pthread_cond_t *, pthread_condattr_t *)
     int pthread_cond_signal(pthread_cond_t *)
     int pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, timespec *)
@@ -53,6 +56,15 @@ cdef extern from "stdlib.h":
 
 cdef extern from "preload.h":
     int set_initialised() nogil
+    pthread_t * get_threads_arr() nogil
+    int * get_threads_waiting_arr() nogil
+    int begin_sample() nogil
+    void end_sample() nogil
+
+
+DEF MAX_THREADS_TRACKED = 1024
+
+cdef int n_threads_tracked = 0
 
 # The pointer to the GIL. Different variables depending on Python 2 or 3:
 
@@ -66,6 +78,10 @@ cdef int * gil_locked = NULL
 cdef PyThreadState * * _PyThreadState_Current = NULL
 
 
+# Number of checks of the GIL and number of times it was held:
+cdef long check_count = 0
+cdef long held_count = 0
+
 # The fraction of the time the GIL has been held:
 cdef double gil_load = 0
 
@@ -73,6 +89,26 @@ cdef double gil_load = 0
 cdef double gil_load_1m = 0
 cdef double gil_load_5m = 0
 cdef double gil_load_15m = 0
+
+
+# Number of checks of threads waiting for the GIL and number of times they were waiting:
+cdef long thread_waiting_count[MAX_THREADS_TRACKED] 
+
+# The fraction of the time each thread is waiting for the GIL:
+cdef double thread_waiting_frac[MAX_THREADS_TRACKED] 
+
+# 1m, 5m, 15m averages:
+cdef double thread_waiting_frac_1m[MAX_THREADS_TRACKED] 
+cdef double thread_waiting_frac_5m[MAX_THREADS_TRACKED] 
+cdef double thread_waiting_frac_15m[MAX_THREADS_TRACKED] 
+
+cdef int i
+for i in range(MAX_THREADS_TRACKED):
+    thread_waiting_count[i] = 0
+    thread_waiting_frac[i] = 0
+    thread_waiting_frac_1m[i] = 0
+    thread_waiting_frac_5m[i] = 0
+    thread_waiting_frac_15m[i] = 0
 
 # The thread that is monitoring the GIL
 monitoring_thread = None
@@ -93,9 +129,9 @@ cdef int stopping = 0
 cdef pthread_cond_t cond
 cdef pthread_mutex_t mutex
 
-# A barrier for other synchronisation:
-cdef pthread_barrier_t barrier
-
+# The arrays that store the threads and whether each is waiting for the GIL:
+cdef pthread_t * threads = get_threads_arr()
+cdef int * threads_waiting = get_threads_waiting_arr()
 
 cdef int gil_held() nogil:
     """Return whether the GIL is held by some thread"""
@@ -223,22 +259,25 @@ cdef int _find_gil_py2(char * data_segment, char * data_segment_nogil, long size
 
 @cython.cdivision(True)
 def _run(double av_sample_interval, double output_interval, output_file):
-    """"""
+
+    global n_threads_tracked
     global stopping
+    global held_count
+    global check_count
     global gil_load
     global gil_load_1m
     global gil_load_5m
     global gil_load_15m
 
+    cdef int i
     cdef int held
-    cdef long held_count = 0
-    cdef long check_count = 0
+    cdef int waiting
     cdef long output_count_interval = max(<long> (output_interval / av_sample_interval), 1)
 
     cdef long next_output_count = output_count_interval
 
     cdef int output = output_file is not None
-    cdef FILE * f
+    cdef FILE * f = NULL
     if output:
         f = fdopen(output_file.fileno(), 'a')
 
@@ -257,9 +296,10 @@ def _run(double av_sample_interval, double output_interval, output_file):
         while not stopping:
             timeout = abstimeout(-av_sample_interval * log(drand48()))
             if pthread_cond_timedwait(&cond, &mutex, &timeout) == ETIMEDOUT:
+                check_count += 1
                 held = gil_held()
                 held_count += held
-                check_count += 1
+
                 gil_load = <double> held_count / <double> check_count
                 if check_count * av_sample_interval > 60:
                     gil_load_1m = k_1 * held + (1 - k_1) * gil_load_1m
@@ -273,13 +313,44 @@ def _run(double av_sample_interval, double output_interval, output_file):
                     gil_load_15m = k_15 * held + (1 - k_15) * gil_load_15m
                 else:
                     gil_load_15m = gil_load
+
+                n_threads_tracked = begin_sample()
+                for i in range(n_threads_tracked):
+                    waiting = threads_waiting[i]
+                    thread_waiting_count[i] += waiting
+                    thread_waiting_frac[i] = <double> thread_waiting_count[i] / <double> check_count
+                    if check_count * av_sample_interval > 60:
+                        thread_waiting_frac_1m[i] = k_1 * waiting + (1 - k_1) *  thread_waiting_frac_1m[i]
+                    else:
+                         thread_waiting_frac_1m[i] =  thread_waiting_frac[i]
+                    if check_count * av_sample_interval > 5 * 60:
+                        thread_waiting_frac_5m[i] = k_5 * waiting + (1 - k_5) * thread_waiting_frac_5m[i]
+                    else:
+                        thread_waiting_frac_5m[i] =  thread_waiting_frac[i]
+                    if check_count * av_sample_interval > 15 * 60:
+                        thread_waiting_frac_15m[i] = k_15 * waiting + (1 - k_15) * thread_waiting_frac_15m[i]
+                    else:
+                       thread_waiting_frac_15m[i] =  thread_waiting_frac[i]
+                end_sample()
+
                 if check_count == next_output_count:
                     next_output_count += output_count_interval
                     if output:
                         mktimestamp(timestamp)
-                        fprintf(f, "%s  GIL load: %.2f (%.2f, %.2f, %.2f)\n",
+                        fprintf(f, "%s gil_held: %.3f (%.3f, %.3f, %.3f)",
                                 timestamp, gil_load,
                                 gil_load_1m, gil_load_5m, gil_load_15m)
+                        for i in range(n_threads_tracked):
+                            # Per thread stats. Don't include the monitoring
+                            # thread itself in stats:
+                            if threads[i] != pthread_self():
+                                fprintf(f, " %ld_wait: %.3f (%.3f, %.3f, %.3f)",
+                                        threads[i],
+                                        thread_waiting_frac[i],
+                                        thread_waiting_frac_1m[i],
+                                        thread_waiting_frac_5m[i],
+                                        thread_waiting_frac_15m[i])
+                        fprintf(f, "\n")
                         fflush(f)
         stopping = 0
         pthread_cond_signal(&cond)
@@ -346,14 +417,25 @@ def start(av_sample_interval=0.05, output_interval=5, output=None, reset_counts=
 
     _checkinit()
 
+    global check_count
+    global held_count
     global gil_load
     global gil_load_1m
     global gil_load_5m
     global gil_load_15m
     global monitoring_thread
 
+    cdef int i
     if reset_counts:
+        check_count = 0
+        held_count = 0
         gil_load = gil_load_1m = gil_load_5m = gil_load_15m = 0
+        for i in range(MAX_THREADS_TRACKED):
+            thread_waiting_count[i] = 0
+            thread_waiting_frac[i] = 0
+            thread_waiting_frac_1m[i] = 0
+            thread_waiting_frac_5m[i] = 0
+            thread_waiting_frac_15m[i] = 0
 
     if isinstance(output, str):
         output = open(output, 'a')
@@ -389,6 +471,13 @@ def stop():
 def get(N=2):
     """Returns the average GIL load, and the 1m, 5m and 15m averages, rounded to N digits"""
     _checkinit()
+    cdef int i
+    threads_waiting_data = {}
+    for i in range(n_threads_tracked):
+        if threads[i] == monitoring_thread.ident():
+            # Don't return stats about the current thread
+            continue
+
     return round(gil_load, N), [round(n, N) for n in (gil_load_1m, gil_load_5m, gil_load_15m)]
 
 
