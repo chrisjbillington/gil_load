@@ -9,7 +9,6 @@ gil_load.init()
 
 def do_some_work():
     for i in range(10):
-        a[:] = np.fft.fft2(a).real
         x = np.random.randn(4096, 4096)
         x[:] = np.fft.fft2(x).real
 

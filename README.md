@@ -1,8 +1,8 @@
 # gil_load
 
-`gil_load` is a utility for measuring the fraction of time the CPython GIL
-(Global interpreter lock) is held. It is for linux only, and has been tested
-on Python 2.7, 3.5 and 3.6
+`gil_load` is a utility for measuring the fraction of time the CPython GIL (Global
+interpreter lock) is held or waited for. It is for linux only, and has been tested on
+Python 2.7, 3.5, 3.6 and 3.7.
 
   * [Installation](#installation)
   * [Introduction](#introduction)
@@ -21,21 +21,18 @@ $ sudo pip3 install gil_load
 or to install from source:
 
 ```
-$ sudo python3 setup.py install --use-cython
+$ sudo python3 setup.py install
 ```
-
-Installing from source requires `cython >= 0.22` to generate the `.c`
-file from the `.pyx` cython extension before compiling and installing. This is
-not necessary if installing with pip, since the `.c` extension file is already
-included in the version uploaded to PyPI.
 
 `gil_load` can also be installed with Python 2.
 
 ## Introduction
 
-A lot of people complain about the Python GIL, saying that it prevents them
-from utilising all cores on their expensive CPUs. In my experience this claim
-is more often than not without merit.
+A lot of people complain about the Python GIL, saying that it prevents them from
+utilising all cores on their expensive CPUs. In my experience this claim is more often
+than not without merit. This module was made mostly to demonstrate that typical parallel
+code in Python, such as numerical calculations using `numpy`, does not suffer from high
+GIL contention and is truly parallel and utilising all cores.
 
 ## Usage
 

@@ -395,10 +395,10 @@ def _run(double av_sample_interval, double output_interval, output_file):
                     next_output_count += output_count_interval
                     if output:
                         mktimestamp(timestamp)
-                        fprintf(f, "%s", timestamp)
+                        fprintf(f, "%s\n", timestamp)
                         fprintf(
                             f,
-                            "  held: %.3f (%.3f, %.3f, %.3f)",
+                            "  held: %.3f (%.3f, %.3f, %.3f)\n",
                             gil_held,
                             gil_held_1m,
                             gil_held_5m,
@@ -417,10 +417,10 @@ def _run(double av_sample_interval, double output_interval, output_file):
                             # Per thread stats. Don't include the monitoring
                             # thread itself in stats:
                             if threads[i] != monitoring_thread_ident:
-                                fprintf(f, "    <%ld>", threads[i])
+                                fprintf(f, "    <%ld>\n", threads[i])
                                 fprintf(
                                     f,
-                                    "  held: %.3f (%.3f, %.3f, %.3f)",
+                                    "      held: %.3f (%.3f, %.3f, %.3f)\n",
                                     thread_held_frac[i],
                                     thread_held_frac_1m[i],
                                     thread_held_frac_5m[i],
@@ -428,7 +428,7 @@ def _run(double av_sample_interval, double output_interval, output_file):
                                 )
                                 fprintf(
                                     f,
-                                    "  wait: %.3f (%.3f, %.3f, %.3f)\n",
+                                    "      wait: %.3f (%.3f, %.3f, %.3f)\n",
                                     thread_wait_frac[i],
                                     thread_wait_frac_1m[i],
                                     thread_wait_frac_5m[i],
@@ -552,7 +552,7 @@ def stop():
         monitoring_thread = None
 
 
-def get(N=3):
+def get():
     """Returns a 2-tuple:
 
         (total_stats, thread_stats)
@@ -594,30 +594,45 @@ def get(N=3):
             continue
 
         thread_stats[threads[i]] = {
-            'held': round(thread_held_frac[i], N),
-            'held_1m': round(thread_held_frac_1m[i], N),
-            'held_5m': round(thread_held_frac_5m[i], N),
-            'held_15m': round(thread_held_frac_15m[i], N),
-            'wait': round(thread_wait_frac[i], N),
-            'wait_1m': round(thread_wait_frac_1m[i], N),
-            'wait_5m': round(thread_wait_frac_5m[i], N),
-            'wait_15m': round(thread_wait_frac_15m[i], N),
+            'held': thread_held_frac[i],
+            'held_1m': thread_held_frac_1m[i],
+            'held_5m': thread_held_frac_5m[i],
+            'held_15m': thread_held_frac_15m[i],
+            'wait': thread_wait_frac[i],
+            'wait_1m': thread_wait_frac_1m[i],
+            'wait_5m': thread_wait_frac_5m[i],
+            'wait_15m': thread_wait_frac_15m[i],
         }
 
     end_sample()
 
     total_stats = {
-        'held': round(gil_held, N),
-        'held_1m': round(gil_held_1m, N),
-        'held_5m': round(gil_held_5m, N),
-        'held_15m': round(gil_held_15m, N),
-        'wait': round(gil_wait, N),
-        'wait_1m': round(gil_wait_1m, N),
-        'wait_5m': round(gil_wait_5m, N),
-        'wait_15m': round(gil_wait_15m, N),
+        'held': gil_held,
+        'held_1m': gil_held_1m,
+        'held_5m': gil_held_5m,
+        'held_15m': gil_held_15m,
+        'wait': gil_wait,
+        'wait_1m': gil_wait_1m,
+        'wait_5m': gil_wait_5m,
+        'wait_15m': gil_wait_15m,
     }
 
     return total_stats, thread_stats
+
+
+# def _fmtline(stats, N):
+#     return f'held: {stats[held]}'
+
+# def format(stats, N=3):
+#     """Format statistics as returned by get() for printing, with all numbers rounded to
+#     N digits. Format is: <thread_id> held: <average> (1m, 5m, 15m) wait: (1m, 5m,
+#     15m)"""
+#     total_stats, thread_stats = stats
+#     all_stats = {}
+#     lines = []
+#     lines.append('<total>'.rjust(15) + _fmtline(total_stats, N=N))
+
+#     return ''.join(lines)
 
 
 def gil_usleep(useconds_t us_nogil, useconds_t us_withgil):
