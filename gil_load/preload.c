@@ -36,6 +36,8 @@ static pthread_mutex_t threads_tracked_mutex;
 // and 'threads' arrays:
 static __thread int thread_number = -1;
 
+// The thread that most recently acquired the GIL:
+static int most_recently_acquired = -1;
 
 void __attribute__ ((constructor)) init_gil_load(void);
 void init_gil_load(void){
@@ -75,6 +77,7 @@ void mark_thread_done_waiting_for_gil(pthread_t thread){
         // printf("%ld got GIL\n", thread);
         threads_waiting[thread_number] = 0;
     }
+    most_recently_acquired = thread_number;
 }
 
 int sem_wait(sem_t *sem){
@@ -138,6 +141,10 @@ pthread_t * get_threads_arr(void){
 
 int * get_threads_waiting_arr(void){
     return threads_waiting;
+}
+
+int get_most_recently_acquired(void){
+    return most_recently_acquired;
 }
 
 int begin_sample(void){

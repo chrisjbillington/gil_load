@@ -58,6 +58,7 @@ cdef extern from "preload.h":
     int set_initialised() nogil
     pthread_t * get_threads_arr() nogil
     int * get_threads_waiting_arr() nogil
+    int get_most_recently_acquired() nogil
     int begin_sample() nogil
     void end_sample() nogil
 
@@ -81,34 +82,52 @@ cdef PyThreadState * * _PyThreadState_Current = NULL
 # Number of checks of the GIL and number of times it was held:
 cdef long check_count = 0
 cdef long held_count = 0
+cdef long wait_count = 0
 
 # The fraction of the time the GIL has been held:
-cdef double gil_load = 0
+cdef double gil_held = 0
 
 # 1m, 5m, 15m averages:
-cdef double gil_load_1m = 0
-cdef double gil_load_5m = 0
-cdef double gil_load_15m = 0
+cdef double gil_held_1m = 0
+cdef double gil_held_5m = 0
+cdef double gil_held_15m = 0
 
-
-# Number of checks of threads waiting for the GIL and number of times they were waiting:
-cdef long thread_waiting_count[MAX_THREADS_TRACKED] 
-
-# The fraction of the time each thread is waiting for the GIL:
-cdef double thread_waiting_frac[MAX_THREADS_TRACKED] 
+# The fraction of the time the GIL was being waited on:
+cdef double gil_wait = 0
 
 # 1m, 5m, 15m averages:
-cdef double thread_waiting_frac_1m[MAX_THREADS_TRACKED] 
-cdef double thread_waiting_frac_5m[MAX_THREADS_TRACKED] 
-cdef double thread_waiting_frac_15m[MAX_THREADS_TRACKED] 
+cdef double gil_wait_1m = 0
+cdef double gil_wait_5m = 0
+cdef double gil_wait_15m = 0
+
+# Number of times threads were holding/waiting for the GIL upon being checked:
+cdef long thread_held_count[MAX_THREADS_TRACKED] 
+cdef long thread_wait_count[MAX_THREADS_TRACKED] 
+
+# The fraction of the time each thread was holding/waiting for the GIL:
+cdef double thread_held_frac[MAX_THREADS_TRACKED] 
+cdef double thread_wait_frac[MAX_THREADS_TRACKED] 
+
+# 1m, 5m, 15m averages:
+cdef double thread_held_frac_1m[MAX_THREADS_TRACKED] 
+cdef double thread_held_frac_5m[MAX_THREADS_TRACKED] 
+cdef double thread_held_frac_15m[MAX_THREADS_TRACKED] 
+cdef double thread_wait_frac_1m[MAX_THREADS_TRACKED] 
+cdef double thread_wait_frac_5m[MAX_THREADS_TRACKED] 
+cdef double thread_wait_frac_15m[MAX_THREADS_TRACKED] 
 
 cdef int i
 for i in range(MAX_THREADS_TRACKED):
-    thread_waiting_count[i] = 0
-    thread_waiting_frac[i] = 0
-    thread_waiting_frac_1m[i] = 0
-    thread_waiting_frac_5m[i] = 0
-    thread_waiting_frac_15m[i] = 0
+    thread_held_count[i] = 0
+    thread_held_frac[i] = 0
+    thread_held_frac_1m[i] = 0
+    thread_held_frac_5m[i] = 0
+    thread_held_frac_15m[i] = 0
+    thread_wait_count[i] = 0
+    thread_wait_frac[i] = 0
+    thread_wait_frac_1m[i] = 0
+    thread_wait_frac_5m[i] = 0
+    thread_wait_frac_15m[i] = 0
 
 # The thread that is monitoring the GIL
 monitoring_thread = None
@@ -135,7 +154,7 @@ cdef int * threads_waiting = get_threads_waiting_arr()
 
 cdef pthread_t monitoring_thread_ident = -1
 
-cdef int gil_held() nogil:
+cdef int get_gil_held() nogil:
     """Return whether the GIL is held by some thread"""
     if PY3:
         return gil_locked[0]
@@ -266,15 +285,23 @@ def _run(double av_sample_interval, double output_interval, output_file):
     global n_threads_tracked
     global stopping
     global held_count
+    global wait_count
     global check_count
-    global gil_load
-    global gil_load_1m
-    global gil_load_5m
-    global gil_load_15m
+    global gil_held
+    global gil_held_1m
+    global gil_held_5m
+    global gil_held_15m
+    global gil_wait
+    global gil_wait_1m
+    global gil_wait_5m
+    global gil_wait_15m
 
     cdef int i
     cdef int held
-    cdef int waiting
+    cdef int wait
+    cdef int thread_held
+    cdef int thread_wait
+    cdef int most_recently_acquired
     cdef long output_count_interval = max(<long> (output_interval / av_sample_interval), 1)
 
     cdef long next_output_count = output_count_interval
@@ -302,59 +329,112 @@ def _run(double av_sample_interval, double output_interval, output_file):
             timeout = abstimeout(-av_sample_interval * log(drand48()))
             if pthread_cond_timedwait(&cond, &mutex, &timeout) == ETIMEDOUT:
                 check_count += 1
-                held = gil_held()
-                held_count += held
-
-                gil_load = <double> held_count / <double> check_count
-                if check_count * av_sample_interval > 60:
-                    gil_load_1m = k_1 * held + (1 - k_1) * gil_load_1m
+                held = get_gil_held()
+                if held:
+                    most_recently_acquired = get_most_recently_acquired()
                 else:
-                    gil_load_1m = gil_load
-                if check_count * av_sample_interval > 5 * 60:
-                    gil_load_5m = k_5 * held + (1 - k_5) * gil_load_5m
-                else:
-                    gil_load_5m = gil_load
-                if check_count * av_sample_interval > 15 * 60:
-                    gil_load_15m = k_15 * held + (1 - k_15) * gil_load_15m
-                else:
-                    gil_load_15m = gil_load
+                    most_recently_acquired = -1
 
                 n_threads_tracked = begin_sample()
+                wait = 0
                 for i in range(n_threads_tracked):
-                    waiting = threads_waiting[i]
-                    thread_waiting_count[i] += waiting
-                    thread_waiting_frac[i] = <double> thread_waiting_count[i] / <double> check_count
+                    thread_wait = threads_waiting[i]
+                    if thread_wait:
+                        wait = 1
+                    thread_held = (i == most_recently_acquired)
+                    thread_wait_count[i] += thread_wait
+                    thread_held_count[i] += thread_held
+                    thread_wait_frac[i] = <double> thread_wait_count[i] / <double> check_count
+                    thread_held_frac[i] = <double> thread_held_count[i] / <double> check_count
                     if check_count * av_sample_interval > 60:
-                        thread_waiting_frac_1m[i] = k_1 * waiting + (1 - k_1) *  thread_waiting_frac_1m[i]
+                        thread_wait_frac_1m[i] = k_1 * thread_wait + (1 - k_1) *  thread_wait_frac_1m[i]
+                        thread_held_frac_1m[i] = k_1 * thread_held + (1 - k_1) *  thread_held_frac_1m[i]
                     else:
-                         thread_waiting_frac_1m[i] =  thread_waiting_frac[i]
+                         thread_wait_frac_1m[i] =  thread_wait_frac[i]
+                         thread_held_frac_1m[i] =  thread_held_frac[i]
                     if check_count * av_sample_interval > 5 * 60:
-                        thread_waiting_frac_5m[i] = k_5 * waiting + (1 - k_5) * thread_waiting_frac_5m[i]
+                        thread_wait_frac_5m[i] = k_5 * thread_wait + (1 - k_5) * thread_wait_frac_5m[i]
+                        thread_held_frac_5m[i] = k_5 * thread_held + (1 - k_5) * thread_held_frac_5m[i]
                     else:
-                        thread_waiting_frac_5m[i] =  thread_waiting_frac[i]
+                        thread_wait_frac_5m[i] =  thread_wait_frac[i]
+                        thread_held_frac_5m[i] =  thread_held_frac[i]
                     if check_count * av_sample_interval > 15 * 60:
-                        thread_waiting_frac_15m[i] = k_15 * waiting + (1 - k_15) * thread_waiting_frac_15m[i]
+                        thread_wait_frac_15m[i] = k_15 * thread_wait + (1 - k_15) * thread_wait_frac_15m[i]
+                        thread_held_frac_15m[i] = k_15 * thread_held + (1 - k_15) * thread_held_frac_15m[i]
                     else:
-                       thread_waiting_frac_15m[i] =  thread_waiting_frac[i]
+                       thread_wait_frac_15m[i] =  thread_wait_frac[i]
+                       thread_held_frac_15m[i] =  thread_held_frac[i]
                 end_sample()
+
+                wait_count += wait
+                held_count += held
+
+                gil_wait = <double> wait_count / <double> check_count
+                gil_held = <double> held_count / <double> check_count
+                if check_count * av_sample_interval > 60:
+                    gil_wait_1m = k_1 * wait + (1 - k_1) * gil_wait_1m
+                    gil_held_1m = k_1 * held + (1 - k_1) * gil_held_1m
+                else:
+                    gil_wait_1m = gil_wait
+                    gil_held_1m = gil_held
+                if check_count * av_sample_interval > 5 * 60:
+                    gil_wait_5m = k_5 * wait + (1 - k_5) * gil_wait_5m
+                    gil_held_5m = k_5 * held + (1 - k_5) * gil_held_5m
+                else:
+                    gil_wait_5m = gil_wait
+                    gil_held_5m = gil_held
+                if check_count * av_sample_interval > 15 * 60:
+                    gil_wait_15m = k_15 * wait + (1 - k_15) * gil_wait_15m
+                    gil_held_15m = k_15 * held + (1 - k_15) * gil_held_15m
+                else:
+                    gil_wait_15m = gil_wait
+                    gil_held_15m = gil_held
+
 
                 if check_count == next_output_count:
                     next_output_count += output_count_interval
                     if output:
                         mktimestamp(timestamp)
-                        fprintf(f, "%s gil_held: %.3f (%.3f, %.3f, %.3f)\n",
-                                timestamp, gil_load,
-                                gil_load_1m, gil_load_5m, gil_load_15m)
+                        fprintf(f, "%s", timestamp)
+                        fprintf(
+                            f,
+                            "  held: %.3f (%.3f, %.3f, %.3f)",
+                            gil_held,
+                            gil_held_1m,
+                            gil_held_5m,
+                            gil_held_15m,
+                        )
+                        fprintf(
+                            f,
+                            "  wait: %.3f (%.3f, %.3f, %.3f)\n",
+                            gil_wait,
+                            gil_wait_1m,
+                            gil_wait_5m,
+                            gil_wait_15m,
+                        )
+
                         for i in range(n_threads_tracked):
                             # Per thread stats. Don't include the monitoring
                             # thread itself in stats:
                             if threads[i] != monitoring_thread_ident:
-                                fprintf(f, "    <%ld>  waiting: %.3f (%.3f, %.3f, %.3f)\n",
-                                        threads[i],
-                                        thread_waiting_frac[i],
-                                        thread_waiting_frac_1m[i],
-                                        thread_waiting_frac_5m[i],
-                                        thread_waiting_frac_15m[i])
+                                fprintf(f, "    <%ld>", threads[i])
+                                fprintf(
+                                    f,
+                                    "  held: %.3f (%.3f, %.3f, %.3f)",
+                                    thread_held_frac[i],
+                                    thread_held_frac_1m[i],
+                                    thread_held_frac_5m[i],
+                                    thread_held_frac_15m[i],
+                                )
+                                fprintf(
+                                    f,
+                                    "  wait: %.3f (%.3f, %.3f, %.3f)\n",
+                                    thread_wait_frac[i],
+                                    thread_wait_frac_1m[i],
+                                    thread_wait_frac_5m[i],
+                                    thread_wait_frac_15m[i],
+                                )
+
                         fprintf(f, "\n")
                         fflush(f)
         stopping = 0
@@ -410,7 +490,7 @@ def init():
     #     printf('gil released\n')
     # printf('gil reacquired\n')
 
-def start(av_sample_interval=0.05, output_interval=5, output=None, reset_counts=False):
+def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts=False):
 
     """Start monitoring the GIL. Monitoring works by spawning a thread
     (running only C code so as not to require the GIL itself), and checking
@@ -424,23 +504,23 @@ def start(av_sample_interval=0.05, output_interval=5, output=None, reset_counts=
 
     global check_count
     global held_count
-    global gil_load
-    global gil_load_1m
-    global gil_load_5m
-    global gil_load_15m
+    global gil_held
+    global gil_held_1m
+    global gil_held_5m
+    global gil_held_15m
     global monitoring_thread
 
     cdef int i
     if reset_counts:
         check_count = 0
         held_count = 0
-        gil_load = gil_load_1m = gil_load_5m = gil_load_15m = 0
+        gil_held = gil_held_1m = gil_held_5m = gil_held_15m = 0
         for i in range(MAX_THREADS_TRACKED):
-            thread_waiting_count[i] = 0
-            thread_waiting_frac[i] = 0
-            thread_waiting_frac_1m[i] = 0
-            thread_waiting_frac_5m[i] = 0
-            thread_waiting_frac_15m[i] = 0
+            thread_wait_count[i] = 0
+            thread_wait_frac[i] = 0
+            thread_wait_frac_1m[i] = 0
+            thread_wait_frac_5m[i] = 0
+            thread_wait_frac_15m[i] = 0
 
     if isinstance(output, str):
         output = open(output, 'a')
@@ -475,50 +555,69 @@ def stop():
 def get(N=3):
     """Returns a 2-tuple:
 
-        (GIL_load_stats, thread_waiting_stats)
+        (total_stats, thread_stats)
 
-    GIL_load_stats is a two-tuple:
+    total_stats is a dict:
 
-        average_GIL_load, (1m, 5m, 15m)
+        {
+            'held': held,
+            'held_1m': held_1m,
+            'held_5m': held_5m,
+            'held_15m': held_15m,
+            'wait': wait,
+            'wait_1m': wait_1m,
+            'wait_5m': wait_5m,
+            'wait_15m': wait_15m,
+        }
 
-    where average_GIL_load is the total fraction of the time that the GIL has been held
-    and (1m, 5m, 15m) are the 1, 5 and 15 minute exponential moving averages thereof.
+    where `held` is the total fraction of the time that the GIL has been held, `wait` is
+    the total fraction of the time the GIL was being waited on, and the `_1m`, `_5m` and
+    `_15m` suffixed entries are the 1, 5, and 15 minute exponential moving averages of
+    the held and wait fractions.
 
+    thread_stats is a dict of the form:
 
-    thread_waiting_stats is a dict of the form:
+        {thread_id: thread_stats}
 
-        {thread_id: (average_thread_waiting_frac, (1m, 5m, 15m))}
-
-    where average_thread_waiting_frac is the total fraction of the time that thread was
-    waiting to acquire the GIL , and (1m, 5m, 15m) are the 1, 5 and 15 minute
-    exponential moving averages thereof.
+    where thread_stats is a dictionary with the same information as total_stats, but
+    pertaining only to the given thread.
 
     All quantities are rounded to N digits."""
     _checkinit()
     cdef int i
-    threads_waiting_stats = {}
+    thread_stats = {}
     n_threads_tracked = begin_sample()
     for i in range(n_threads_tracked):
         if threads[i] == monitoring_thread_ident:
             # Don't return stats about the monitoring thread since it never holds the
             # GIL
             continue
-        threads_waiting_stats[threads[i]] = (
-            round(thread_waiting_frac[i], N),
-            (
-                round(thread_waiting_frac_1m[i], N),
-                round(thread_waiting_frac_5m[i], N),
-                round(thread_waiting_frac_15m[i], N),
-            )
-        )
 
-    GIL_load_stats = (
-        round(gil_load, N),
-        tuple(round(n, N) for n in (gil_load_1m, gil_load_5m, gil_load_15m))
-    )
+        thread_stats[threads[i]] = {
+            'held': round(thread_held_frac[i], N),
+            'held_1m': round(thread_held_frac_1m[i], N),
+            'held_5m': round(thread_held_frac_5m[i], N),
+            'held_15m': round(thread_held_frac_15m[i], N),
+            'wait': round(thread_wait_frac[i], N),
+            'wait_1m': round(thread_wait_frac_1m[i], N),
+            'wait_5m': round(thread_wait_frac_5m[i], N),
+            'wait_15m': round(thread_wait_frac_15m[i], N),
+        }
+
     end_sample()
 
-    return GIL_load_stats, threads_waiting_stats
+    total_stats = {
+        'held': round(gil_held, N),
+        'held_1m': round(gil_held_1m, N),
+        'held_5m': round(gil_held_5m, N),
+        'held_15m': round(gil_held_15m, N),
+        'wait': round(gil_wait, N),
+        'wait_1m': round(gil_wait_1m, N),
+        'wait_5m': round(gil_wait_5m, N),
+        'wait_15m': round(gil_wait_15m, N),
+    }
+
+    return total_stats, thread_stats
 
 
 def gil_usleep(useconds_t us_nogil, useconds_t us_withgil):
@@ -539,10 +638,10 @@ def test():
     if threading.active_count() > 1:
         raise RuntimeError("Test only valid if no other threads running")
     
-    assert gil_held() == 1, "gil_held() returned 0 when we were holding the GIL"
+    assert get_gil_held() == 1, "gil_held() returned 0 when we were holding the GIL"
 
     with nogil:
-         result = gil_held()
+         result = get_gil_held()
     assert result == 0, "gil_held() returned 1 when we were not holding the GIL"
     
     return True

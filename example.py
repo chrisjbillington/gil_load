@@ -3,27 +3,28 @@ import numpy as np
 import threading
 import gil_load
 
-
-x = np.random.randn(4096, 4096)
-y = np.random.randn(4096, 4096)
-
-def inplace_fft(a):
-    for i in range(10):
-        a[:] = np.fft.fft2(a).real
-
+N_THREADS = 4
 
 gil_load.init()
-gil_load.start(output=sys.stdout, output_interval=1)
 
-thread1 = threading.Thread(target=inplace_fft, args=(x,))
-thread2 = threading.Thread(target=inplace_fft, args=(y,))
+def do_some_work():
+    for i in range(10):
+        a[:] = np.fft.fft2(a).real
+        x = np.random.randn(4096, 4096)
+        x[:] = np.fft.fft2(x).real
 
-thread1.start()
-thread2.start()
+gil_load.start(av_sample_interval=0.005, output=sys.stdout, output_interval=1)
 
-thread1.join()
-thread2.join()
+threads = []
+for i in range(N_THREADS):
+    thread = threading.Thread(target=do_some_work, daemon=True)
+    threads.append(thread)
+    thread.start()
+
+
+for thread in threads:
+    thread.join()
 
 gil_load.stop()
 
-print(gil_load.get(N=4))
+print(gil_load.get(N=10))
