@@ -1,6 +1,13 @@
-from __future__ import absolute_import
-
-# A litte module that just prints the preload path to stdout so that it can be preloaded like:
-# LD_PRELOAD=$(python -m gil_load) python my_script.py
 import gil_load
-print(gil_load.preload_path)
+import os
+import sys
+
+preload_path = gil_load.preload_path
+
+LD_PRELOAD = os.getenv('LD_PRELOAD')
+if LD_PRELOAD is not None:
+    preload_path += ':' + LD_PRELOAD
+
+os.environ['LD_PRELOAD'] = preload_path
+
+os.execv(sys.executable, [sys.executable] + sys.argv[1:])

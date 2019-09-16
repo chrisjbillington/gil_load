@@ -1,6 +1,6 @@
 // Compile with:
 // gcc -g3 -Wall -fPIC -shared -o override.so override.c -ldl -lpthread
-#define _GNU_SOURCE
+#define _GNU_SOURCE 1
 #include <Python.h>
 #include <stdio.h>
 #include <dlfcn.h>
@@ -37,8 +37,8 @@ static pthread_mutex_t threads_tracked_mutex;
 static __thread int thread_number = -1;
 
 
-void __attribute__ ((constructor)) init(void);
-void init(void){
+void __attribute__ ((constructor)) init_gil_load(void);
+void init_gil_load(void){
     sem_wait_internal = dlsym(RTLD_NEXT, "sem_wait");
     mutex_lock_internal = dlsym(RTLD_NEXT, "pthread_mutex_lock");
     mutex_unlock_internal = dlsym(RTLD_NEXT, "pthread_mutex_unlock");

@@ -133,6 +133,8 @@ cdef pthread_mutex_t mutex
 cdef pthread_t * threads = get_threads_arr()
 cdef int * threads_waiting = get_threads_waiting_arr()
 
+cdef pthread_t monitoring_thread_ident = -1
+
 cdef int gil_held() nogil:
     """Return whether the GIL is held by some thread"""
     if PY3:
@@ -260,6 +262,7 @@ cdef int _find_gil_py2(char * data_segment, char * data_segment_nogil, long size
 @cython.cdivision(True)
 def _run(double av_sample_interval, double output_interval, output_file):
 
+    global monitoring_thread_ident
     global n_threads_tracked
     global stopping
     global held_count
@@ -288,6 +291,8 @@ def _run(double av_sample_interval, double output_interval, output_file):
     cdef char timestamp[26]
 
     cdef timespec timeout
+
+    monitoring_thread_ident = pthread_self()
 
     srand48(time(NULL))
 
@@ -337,14 +342,14 @@ def _run(double av_sample_interval, double output_interval, output_file):
                     next_output_count += output_count_interval
                     if output:
                         mktimestamp(timestamp)
-                        fprintf(f, "%s gil_held: %.3f (%.3f, %.3f, %.3f)",
+                        fprintf(f, "%s gil_held: %.3f (%.3f, %.3f, %.3f)\n",
                                 timestamp, gil_load,
                                 gil_load_1m, gil_load_5m, gil_load_15m)
                         for i in range(n_threads_tracked):
                             # Per thread stats. Don't include the monitoring
                             # thread itself in stats:
-                            if threads[i] != pthread_self():
-                                fprintf(f, " %ld_wait: %.3f (%.3f, %.3f, %.3f)",
+                            if threads[i] != monitoring_thread_ident:
+                                fprintf(f, "    <%ld>  waiting: %.3f (%.3f, %.3f, %.3f)\n",
                                         threads[i],
                                         thread_waiting_frac[i],
                                         thread_waiting_frac_1m[i],
@@ -387,23 +392,23 @@ def init():
     pthread_cond_init(&cond, &condattr)
     pthread_mutex_init(&mutex, NULL)
 
-    printf('gil held\n')
-    with nogil:
-        printf('gil released\n')
-    printf('gil reacquired\n')
+    # printf('gil held\n')
+    # with nogil:
+    #     printf('gil released\n')
+    # printf('gil reacquired\n')
 
     cdef int rc = set_initialised()
     if rc != 0:
-        msg = ("preload library not loaded prior to starting Python. " + 
-              "gil_load requires a library to be preloaded with LD_PRELOAD." +
+        msg = ("gil_load preload library not loaded prior to starting Python. " + 
+              "gil_load requires a library to be preloaded with LD_PRELOAD. " +
               "run your script in the following way to preload the required library:\n\n" +
-              "LD_PRELOAD=$(python -m gil_load) python my_script.py")
+              "python -m gil_load my_script.py")
         raise RuntimeError(msg)
 
-    printf('gil held\n')
-    with nogil:
-        printf('gil released\n')
-    printf('gil reacquired\n')
+    # printf('gil held\n')
+    # with nogil:
+    #     printf('gil released\n')
+    # printf('gil reacquired\n')
 
 def start(av_sample_interval=0.05, output_interval=5, output=None, reset_counts=False):
 
@@ -450,8 +455,7 @@ def start(av_sample_interval=0.05, output_interval=5, output=None, reset_counts=
 
 
 def stop():
-    """Stop monitoring the GIL. Accumulated statistics will still be available
-    with get()"""
+    """Stop monitoring the GIL."""
     global monitoring_thread
     global stopping
     with lock:
@@ -468,17 +472,53 @@ def stop():
         monitoring_thread = None
 
 
-def get(N=2):
-    """Returns the average GIL load, and the 1m, 5m and 15m averages, rounded to N digits"""
+def get(N=3):
+    """Returns a 2-tuple:
+
+        (GIL_load_stats, thread_waiting_stats)
+
+    GIL_load_stats is a two-tuple:
+
+        average_GIL_load, (1m, 5m, 15m)
+
+    where average_GIL_load is the total fraction of the time that the GIL has been held
+    and (1m, 5m, 15m) are the 1, 5 and 15 minute exponential moving averages thereof.
+
+
+    thread_waiting_stats is a dict of the form:
+
+        {thread_id: (average_thread_waiting_frac, (1m, 5m, 15m))}
+
+    where average_thread_waiting_frac is the total fraction of the time that thread was
+    waiting to acquire the GIL , and (1m, 5m, 15m) are the 1, 5 and 15 minute
+    exponential moving averages thereof.
+
+    All quantities are rounded to N digits."""
     _checkinit()
     cdef int i
-    threads_waiting_data = {}
+    threads_waiting_stats = {}
+    n_threads_tracked = begin_sample()
     for i in range(n_threads_tracked):
-        if threads[i] == monitoring_thread.ident():
-            # Don't return stats about the current thread
+        if threads[i] == monitoring_thread_ident:
+            # Don't return stats about the monitoring thread since it never holds the
+            # GIL
             continue
+        threads_waiting_stats[threads[i]] = (
+            round(thread_waiting_frac[i], N),
+            (
+                round(thread_waiting_frac_1m[i], N),
+                round(thread_waiting_frac_5m[i], N),
+                round(thread_waiting_frac_15m[i], N),
+            )
+        )
 
-    return round(gil_load, N), [round(n, N) for n in (gil_load_1m, gil_load_5m, gil_load_15m)]
+    GIL_load_stats = (
+        round(gil_load, N),
+        tuple(round(n, N) for n in (gil_load_1m, gil_load_5m, gil_load_15m))
+    )
+    end_sample()
+
+    return GIL_load_stats, threads_waiting_stats
 
 
 def gil_usleep(useconds_t us_nogil, useconds_t us_withgil):

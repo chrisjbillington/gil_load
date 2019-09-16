@@ -18,7 +18,6 @@ def _load_preload_lib():
         so_name += ext_suffix
     else:
         so_name += '.so'
-    import sys
     ctypes.CDLL(so_name, ctypes.RTLD_GLOBAL) 
     return so_name
 
