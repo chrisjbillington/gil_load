@@ -9,7 +9,7 @@ from cpython.version cimport PY_MAJOR_VERSION
 from cpython.pystate cimport PyThreadState_Get, PyThreadState
 from libc.errno cimport ETIMEDOUT
 from libc.stdlib cimport malloc, free
-from libc.stdio cimport printf, fprintf, FILE, fdopen, fflush
+from libc.stdio cimport printf, fprintf, FILE, fdopen, fclose, fflush
 from libc.string cimport memcpy
 from libc.math cimport log
 from libc.time cimport time, time_t, localtime, strftime, tm
@@ -141,9 +141,9 @@ if not (PY2 or PY3):
     raise ImportError("Only compatible with Python 2 or 3")
 
 
-# A flag to tell the monitoring thread to stop, and an associated condition
-# and mutex to ensure we can wake it when sleeping and tell it to quit in a
-# race-free way.
+# Flags to tell the monitoring thread to start or stop, and an associated condition and
+# mutex to ensure we can wake it when sleeping and tell it to quit in a race-free way.
+cdef int starting = 0
 cdef int stopping = 0
 cdef pthread_cond_t cond
 cdef pthread_mutex_t mutex
@@ -278,8 +278,22 @@ cdef int _find_gil_py2(char * data_segment, char * data_segment_nogil, long size
     return -1
 
 
+cdef void wait_until_start() nogil:
+    global starting
+    while not starting:
+        pthread_cond_wait(&cond, &mutex)
+    starting = 0
+    pthread_cond_signal(&cond)
+
+
+# Globals used in _run that can change between subsequent calls to start():
+cdef FILE * _f = NULL
+cdef double _av_sample_interval
+cdef double _output_interval
+cdef int _close_file_on_stop
+
 @cython.cdivision(True)
-def _run(double av_sample_interval, double output_interval, output_file):
+def _run():
 
     global monitoring_thread_ident
     global n_threads_tracked
@@ -296,6 +310,11 @@ def _run(double av_sample_interval, double output_interval, output_file):
     global gil_wait_5m
     global gil_wait_15m
 
+    # These ones can change from one call to start() to the next:
+    cdef FILE * f = _f
+    cdef double av_sample_interval = _av_sample_interval
+    cdef double output_interval = _output_interval
+
     cdef int i
     cdef int held
     cdef int wait
@@ -305,11 +324,6 @@ def _run(double av_sample_interval, double output_interval, output_file):
     cdef long output_count_interval = max(<long> (output_interval / av_sample_interval), 1)
 
     cdef long next_output_count = output_count_interval
-
-    cdef int output = output_file is not None
-    cdef FILE * f = NULL
-    if output:
-        f = fdopen(output_file.fileno(), 'a')
 
     cdef double k_1 = av_sample_interval/60.0
     cdef double k_5 = av_sample_interval/(5*60.0)
@@ -325,121 +339,128 @@ def _run(double av_sample_interval, double output_interval, output_file):
 
     with nogil:
         pthread_mutex_lock(&mutex)
-        while not stopping:
-            timeout = abstimeout(-av_sample_interval * log(drand48()))
-            if pthread_cond_timedwait(&cond, &mutex, &timeout) == ETIMEDOUT:
-                check_count += 1
-                held = get_gil_held()
-                if held:
-                    most_recently_acquired = get_most_recently_acquired()
-                else:
-                    most_recently_acquired = -1
+        while True:
+            wait_until_start()
+            # Update the output file, sample and output intervals which may have been
+            # set as globals:
+            f = _f
+            av_sample_interval = _av_sample_interval
+            output_interval = _output_interval
+            while not stopping:
+                timeout = abstimeout(-av_sample_interval * log(drand48()))
+                if pthread_cond_timedwait(&cond, &mutex, &timeout) == ETIMEDOUT:
+                    check_count += 1
+                    held = get_gil_held()
+                    if held:
+                        most_recently_acquired = get_most_recently_acquired()
+                    else:
+                        most_recently_acquired = -1
 
-                n_threads_tracked = begin_sample()
-                wait = 0
-                for i in range(n_threads_tracked):
-                    thread_wait = threads_waiting[i]
-                    if thread_wait:
-                        wait = 1
-                    thread_held = (i == most_recently_acquired)
-                    thread_wait_count[i] += thread_wait
-                    thread_held_count[i] += thread_held
-                    thread_wait_frac[i] = <double> thread_wait_count[i] / <double> check_count
-                    thread_held_frac[i] = <double> thread_held_count[i] / <double> check_count
+                    n_threads_tracked = begin_sample()
+                    wait = 0
+                    for i in range(n_threads_tracked):
+                        thread_wait = threads_waiting[i]
+                        if thread_wait:
+                            wait = 1
+                        thread_held = (i == most_recently_acquired)
+                        thread_wait_count[i] += thread_wait
+                        thread_held_count[i] += thread_held
+                        thread_wait_frac[i] = <double> thread_wait_count[i] / <double> check_count
+                        thread_held_frac[i] = <double> thread_held_count[i] / <double> check_count
+                        if check_count * av_sample_interval > 60:
+                            thread_wait_frac_1m[i] = k_1 * thread_wait + (1 - k_1) *  thread_wait_frac_1m[i]
+                            thread_held_frac_1m[i] = k_1 * thread_held + (1 - k_1) *  thread_held_frac_1m[i]
+                        else:
+                             thread_wait_frac_1m[i] =  thread_wait_frac[i]
+                             thread_held_frac_1m[i] =  thread_held_frac[i]
+                        if check_count * av_sample_interval > 5 * 60:
+                            thread_wait_frac_5m[i] = k_5 * thread_wait + (1 - k_5) * thread_wait_frac_5m[i]
+                            thread_held_frac_5m[i] = k_5 * thread_held + (1 - k_5) * thread_held_frac_5m[i]
+                        else:
+                            thread_wait_frac_5m[i] =  thread_wait_frac[i]
+                            thread_held_frac_5m[i] =  thread_held_frac[i]
+                        if check_count * av_sample_interval > 15 * 60:
+                            thread_wait_frac_15m[i] = k_15 * thread_wait + (1 - k_15) * thread_wait_frac_15m[i]
+                            thread_held_frac_15m[i] = k_15 * thread_held + (1 - k_15) * thread_held_frac_15m[i]
+                        else:
+                           thread_wait_frac_15m[i] =  thread_wait_frac[i]
+                           thread_held_frac_15m[i] =  thread_held_frac[i]
+                    end_sample()
+
+                    wait_count += wait
+                    held_count += held
+
+                    gil_wait = <double> wait_count / <double> check_count
+                    gil_held = <double> held_count / <double> check_count
                     if check_count * av_sample_interval > 60:
-                        thread_wait_frac_1m[i] = k_1 * thread_wait + (1 - k_1) *  thread_wait_frac_1m[i]
-                        thread_held_frac_1m[i] = k_1 * thread_held + (1 - k_1) *  thread_held_frac_1m[i]
+                        gil_wait_1m = k_1 * wait + (1 - k_1) * gil_wait_1m
+                        gil_held_1m = k_1 * held + (1 - k_1) * gil_held_1m
                     else:
-                         thread_wait_frac_1m[i] =  thread_wait_frac[i]
-                         thread_held_frac_1m[i] =  thread_held_frac[i]
+                        gil_wait_1m = gil_wait
+                        gil_held_1m = gil_held
                     if check_count * av_sample_interval > 5 * 60:
-                        thread_wait_frac_5m[i] = k_5 * thread_wait + (1 - k_5) * thread_wait_frac_5m[i]
-                        thread_held_frac_5m[i] = k_5 * thread_held + (1 - k_5) * thread_held_frac_5m[i]
+                        gil_wait_5m = k_5 * wait + (1 - k_5) * gil_wait_5m
+                        gil_held_5m = k_5 * held + (1 - k_5) * gil_held_5m
                     else:
-                        thread_wait_frac_5m[i] =  thread_wait_frac[i]
-                        thread_held_frac_5m[i] =  thread_held_frac[i]
+                        gil_wait_5m = gil_wait
+                        gil_held_5m = gil_held
                     if check_count * av_sample_interval > 15 * 60:
-                        thread_wait_frac_15m[i] = k_15 * thread_wait + (1 - k_15) * thread_wait_frac_15m[i]
-                        thread_held_frac_15m[i] = k_15 * thread_held + (1 - k_15) * thread_held_frac_15m[i]
+                        gil_wait_15m = k_15 * wait + (1 - k_15) * gil_wait_15m
+                        gil_held_15m = k_15 * held + (1 - k_15) * gil_held_15m
                     else:
-                       thread_wait_frac_15m[i] =  thread_wait_frac[i]
-                       thread_held_frac_15m[i] =  thread_held_frac[i]
-                end_sample()
-
-                wait_count += wait
-                held_count += held
-
-                gil_wait = <double> wait_count / <double> check_count
-                gil_held = <double> held_count / <double> check_count
-                if check_count * av_sample_interval > 60:
-                    gil_wait_1m = k_1 * wait + (1 - k_1) * gil_wait_1m
-                    gil_held_1m = k_1 * held + (1 - k_1) * gil_held_1m
-                else:
-                    gil_wait_1m = gil_wait
-                    gil_held_1m = gil_held
-                if check_count * av_sample_interval > 5 * 60:
-                    gil_wait_5m = k_5 * wait + (1 - k_5) * gil_wait_5m
-                    gil_held_5m = k_5 * held + (1 - k_5) * gil_held_5m
-                else:
-                    gil_wait_5m = gil_wait
-                    gil_held_5m = gil_held
-                if check_count * av_sample_interval > 15 * 60:
-                    gil_wait_15m = k_15 * wait + (1 - k_15) * gil_wait_15m
-                    gil_held_15m = k_15 * held + (1 - k_15) * gil_held_15m
-                else:
-                    gil_wait_15m = gil_wait
-                    gil_held_15m = gil_held
+                        gil_wait_15m = gil_wait
+                        gil_held_15m = gil_held
 
 
-                if check_count == next_output_count:
-                    next_output_count += output_count_interval
-                    if output:
-                        mktimestamp(timestamp)
-                        fprintf(f, "%s\n", timestamp)
-                        fprintf(
-                            f,
-                            "  held: %.3f (%.3f, %.3f, %.3f)\n",
-                            gil_held,
-                            gil_held_1m,
-                            gil_held_5m,
-                            gil_held_15m,
-                        )
-                        fprintf(
-                            f,
-                            "  wait: %.3f (%.3f, %.3f, %.3f)\n",
-                            gil_wait,
-                            gil_wait_1m,
-                            gil_wait_5m,
-                            gil_wait_15m,
-                        )
+                    if check_count == next_output_count:
+                        next_output_count += output_count_interval
+                        if f != NULL:
+                            mktimestamp(timestamp)
+                            fprintf(f, "%s\n", timestamp)
+                            fprintf(
+                                f,
+                                "  held: %.3f (%.3f, %.3f, %.3f)\n",
+                                gil_held,
+                                gil_held_1m,
+                                gil_held_5m,
+                                gil_held_15m,
+                            )
+                            fprintf(
+                                f,
+                                "  wait: %.3f (%.3f, %.3f, %.3f)\n",
+                                gil_wait,
+                                gil_wait_1m,
+                                gil_wait_5m,
+                                gil_wait_15m,
+                            )
 
-                        for i in range(n_threads_tracked):
-                            # Per thread stats. Don't include the monitoring
-                            # thread itself in stats:
-                            if threads[i] != monitoring_thread_ident:
-                                fprintf(f, "    <%ld>\n", threads[i])
-                                fprintf(
-                                    f,
-                                    "      held: %.3f (%.3f, %.3f, %.3f)\n",
-                                    thread_held_frac[i],
-                                    thread_held_frac_1m[i],
-                                    thread_held_frac_5m[i],
-                                    thread_held_frac_15m[i],
-                                )
-                                fprintf(
-                                    f,
-                                    "      wait: %.3f (%.3f, %.3f, %.3f)\n",
-                                    thread_wait_frac[i],
-                                    thread_wait_frac_1m[i],
-                                    thread_wait_frac_5m[i],
-                                    thread_wait_frac_15m[i],
-                                )
+                            for i in range(n_threads_tracked):
+                                # Per thread stats. Don't include the monitoring
+                                # thread itself in stats:
+                                if threads[i] != monitoring_thread_ident:
+                                    fprintf(f, "    <%ld>\n", threads[i])
+                                    fprintf(
+                                        f,
+                                        "      held: %.3f (%.3f, %.3f, %.3f)\n",
+                                        thread_held_frac[i],
+                                        thread_held_frac_1m[i],
+                                        thread_held_frac_5m[i],
+                                        thread_held_frac_15m[i],
+                                    )
+                                    fprintf(
+                                        f,
+                                        "      wait: %.3f (%.3f, %.3f, %.3f)\n",
+                                        thread_wait_frac[i],
+                                        thread_wait_frac_1m[i],
+                                        thread_wait_frac_5m[i],
+                                        thread_wait_frac_15m[i],
+                                    )
 
-                        fprintf(f, "\n")
-                        fflush(f)
-        stopping = 0
-        pthread_cond_signal(&cond)
-        pthread_mutex_unlock(&mutex)
+                            fprintf(f, "\n")
+                            fflush(f)
+            stopping = 0
+            pthread_cond_signal(&cond)
+            # pthread_mutex_unlock(&mutex)
 
 
 def _checkinit():
@@ -509,6 +530,11 @@ def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts
     global gil_held_5m
     global gil_held_15m
     global monitoring_thread
+    global starting
+    global _f
+    global _av_sample_interval
+    global _output_interval
+    global _close_file_on_stop
 
     cdef int i
     if reset_counts:
@@ -524,14 +550,31 @@ def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts
 
     if isinstance(output, str):
         output = open(output, 'a')
+        _close_file_on_stop = 1
+    else:
+        _close_file_on_stop = 0
+
+    if output is not None:
+        _f = fdopen(output.fileno(), 'a')
+    else:
+        _f = NULL
+
+    _av_sample_interval = av_sample_interval
+    _output_interval = output_interval
 
     with lock:
-        if monitoring_thread is not None:
-            raise RuntimeError("GIL monitoring already started")
-        monitoring_thread = threading.Thread(target=_run,
-                                             args=(av_sample_interval, output_interval, output))
-        monitoring_thread.daemon = True
-        monitoring_thread.start()
+        if monitoring_thread is None:
+            monitoring_thread = threading.Thread(target=_run)
+            monitoring_thread.daemon = True
+            monitoring_thread.start()
+
+        # Signal to the thread to start monitoring:
+        with nogil:
+            pthread_mutex_lock(&mutex)
+            starting = 1
+            pthread_cond_signal(&cond)
+            pthread_mutex_unlock(&mutex)
+
 
 
 def stop():
@@ -539,18 +582,16 @@ def stop():
     global monitoring_thread
     global stopping
     with lock:
-        if monitoring_thread is None:
-            raise RuntimeError("GIL monitoring not running")
-        # Tell the monitoring thread to stop and then wait for it:
+        # Tell the monitoring thread to stop and then wait for it to confirm:
         pthread_mutex_lock(&mutex)
         stopping = 1
         pthread_cond_signal(&cond)
         while stopping:
             pthread_cond_wait(&cond, &mutex)
         pthread_mutex_unlock(&mutex)
-        monitoring_thread.join()
-        monitoring_thread = None
 
+    if _close_file_on_stop:
+        fclose(_f)
 
 def get():
     """Returns a 2-tuple:
