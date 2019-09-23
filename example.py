@@ -5,11 +5,12 @@ import gil_load
 
 N_THREADS = 4
 
+NPTS = 4096
 gil_load.init()
 
 def do_some_work():
-    for i in range(10):
-        x = np.random.randn(4096, 4096)
+    for i in range(5):
+        x = np.random.randn(NPTS, NPTS)
         x[:] = np.fft.fft2(x).real
 
 gil_load.start(av_sample_interval=0.005, output=sys.stdout, output_interval=1)
@@ -26,4 +27,5 @@ for thread in threads:
 
 gil_load.stop()
 
-print(gil_load.get(N=10))
+stats = gil_load.get()
+print(gil_load.format(stats))

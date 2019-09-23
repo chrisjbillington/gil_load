@@ -23,7 +23,7 @@ def _load_preload_lib():
 
 preload_path = _load_preload_lib()
 
-from .gil_load import init, test, start, stop, get
+from .gil_load import init, test, start, stop, get, format
 
 
-__all__ = ["init", "test", "start", "stop", "get", "preload_path"]
+__all__ = ["init", "test", "start", "stop", "get", "preload_path", "format"]

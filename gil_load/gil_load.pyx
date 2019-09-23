@@ -1,3 +1,4 @@
+# cython: language_level=3
 from __future__ import absolute_import
 import sys
 import os
@@ -661,19 +662,36 @@ def get():
     return total_stats, thread_stats
 
 
-# def _fmtline(stats, N):
-#     return f'held: {stats[held]}'
+def format(stats, N=3):
+    """Format statistics as returned by get() for printing, with all numbers rounded to
+    N digits. Format is:
 
-# def format(stats, N=3):
-#     """Format statistics as returned by get() for printing, with all numbers rounded to
-#     N digits. Format is: <thread_id> held: <average> (1m, 5m, 15m) wait: (1m, 5m,
-#     15m)"""
-#     total_stats, thread_stats = stats
-#     all_stats = {}
-#     lines = []
-#     lines.append('<total>'.rjust(15) + _fmtline(total_stats, N=N))
-
-#     return ''.join(lines)
+    held: <average> (1m, 5m, 15m)
+    wait: <average> (1m, 5m, 15m)
+      <thread_id>
+        held: <average> (1m, 5m, 15m)
+        wait: <average> (1m, 5m, 15m)
+      ...
+    """
+    total_stats, thread_stats = stats
+    lines = []
+    total_stats = {k: round(v, N) for k, v in total_stats.items()}
+    lines.append(
+        "held: {held} ({held_1m}, {held_5m}, {held_15m})".format(**total_stats)
+    )
+    lines.append(
+        "wait: {wait} ({wait_1m}, {wait_5m}, {wait_15m})".format(**total_stats)
+    )
+    for thread_id, stats in thread_stats.items():
+        lines.append('  <{}>'.format(thread_id))
+        stats = {k: round(v, N) for k, v in stats.items()}
+        lines.append(
+            "    held: {held} ({held_1m}, {held_5m}, {held_15m})".format(**stats)
+        )
+        lines.append(
+            "    wait: {wait} ({wait_1m}, {wait_5m}, {wait_15m})".format(**stats)
+        )
+    return '\n'.join(lines)
 
 
 def gil_usleep(useconds_t us_nogil, useconds_t us_withgil):
