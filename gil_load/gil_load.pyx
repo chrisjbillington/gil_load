@@ -470,14 +470,13 @@ def _checkinit():
 
 
 def init():
-    """Find the data structure for the GIL in memory so that we can monitor it
-    later to see how often it is held. This function must be called before any
-    other threads are started, and before calling start() to start monitoring
-    the GIL. Note: this function calls PyEval_InitThreads(), so if your
-    application was single-threaded, it will take a slight performance hit
-    from this, as the Python interpreter is not quite as efficient in
-    multithreaded mode as it is in single-threaded mode, even if there is only
-    one thread running."""
+    """Find the data structure for the GIL in memory so that we can monitor it later to
+    see how often it is held. This function must be called before any other threads are
+    started, and before calling `gil_load.start()`. Note: this function calls
+    `PyEval_InitThreads()`, so if your application was single-threaded, it will take a
+    slight performance hit from this, as the Python interpreter is not quite as
+    efficient in multithreaded mode as it is in single-threaded mode, even if there is
+    only one thread running."""
 
     if threading.active_count() > 1:
         raise RuntimeError("gil_load.init() must be called prior to other "
@@ -513,14 +512,23 @@ def init():
     # printf('gil reacquired\n')
 
 def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts=False):
-
-    """Start monitoring the GIL. Monitoring works by spawning a thread
-    (running only C code so as not to require the GIL itself), and checking
-    whether the GIL is held at random times. The random interval between times
-    is exponentially distributed with mean set by av_sample_interval. Over
-    time, statistics are accumulated for what proportion of the time the
-    GIL was held. Overall load, as well as 1 minute, 5 minute, and 15 minute
-    exponential moving averages are computed."""
+    """Start monitoring the GIL. Monitoring runs in a separate thread (running only C
+    code so as not to require the GIL itself), and checking whether the GIL is held at
+    random times. The interval between sampling times is exponentially distributed with
+    mean set by `av_sample_interval`. Over time, statistics are accumulated for what
+    proportion of the time the GIL was held. Overall load, as well as 1 minute, 5
+    minute, and 15 minute exponential moving averages are computed. If `output` is not
+    None, then it should be an open file (such as sys.stdout) or a filename (if the
+    latter it will be opened in append mode), and the average GIL load will be written
+    to this file approximately every `output_interval` seconds. If `reset_counts` is
+    `True`, then the accumulated statics from previous calls to `start()` and then
+    `stop()` wil lbe cleared. If you do not clear the counts, then you can repeatedly
+    sample the GIL usage of just a small segment of your code by wrapping it with calls
+    to `start()` and `stop()`. Due to the exponential distribution of sampling
+    intervals, this will accumulate accurate statistics even if the time the function
+    takes to run is less than `av_sample_interval`. However, each call to start() does
+    involve the starting of a new thread, the overhead of which may make profiling very
+    short segments of code inaccurate."""
 
     _checkinit()
 
@@ -579,7 +587,8 @@ def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts
 
 
 def stop():
-    """Stop monitoring the GIL."""
+    """Stop monitoring the GIL. Accumulated statistics can then be accessed with
+    `gil_load.get()`."""
     global monitoring_thread
     global stopping
     with lock:
@@ -622,9 +631,7 @@ def get():
         {thread_id: thread_stats}
 
     where thread_stats is a dictionary with the same information as total_stats, but
-    pertaining only to the given thread.
-
-    All quantities are rounded to N digits."""
+    pertaining only to the given thread."""
     _checkinit()
     cdef int i
     thread_stats = {}
@@ -702,8 +709,9 @@ def gil_usleep(useconds_t us_nogil, useconds_t us_withgil):
 
 
 def test():
-    """Checks whether indeed the gil_held() function returns whether or not
-    the GIL is held."""
+    """Test that the code can in fact determine whether the GIL is held for your Python
+    interpreter. Raises `AssertionError` on failure, returns True on success. Must be
+    called after `gil_load.init()`.."""
 
     cdef int result
 
