@@ -573,7 +573,7 @@ def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts
 
     with lock:
         if monitoring_thread is None:
-            monitoring_thread = threading.Thread(target=_run)
+            monitoring_thread = threading.Thread(target=_run, name="gil_load")
             monitoring_thread.daemon = True
             monitoring_thread.start()
 
