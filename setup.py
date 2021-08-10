@@ -3,7 +3,7 @@ from setuptools import setup
 from setuptools.extension import Extension
 from Cython.Build import cythonize
 
-VERSION = '0.4.1'
+VERSION = '0.4.2'
 
 # Auto generate a __version__ package for the package to import
 with open(os.path.join('gil_load', '__version__.py'), 'w') as f:
