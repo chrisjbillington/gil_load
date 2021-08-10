@@ -292,6 +292,7 @@ cdef FILE * _f = NULL
 cdef double _av_sample_interval
 cdef double _output_interval
 cdef int _close_file_on_stop
+_py_f = None
 
 @cython.cdivision(True)
 def _run():
@@ -518,8 +519,8 @@ def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts
     mean set by `av_sample_interval`. Over time, statistics are accumulated for what
     proportion of the time the GIL was held. Overall load, as well as 1 minute, 5
     minute, and 15 minute exponential moving averages are computed. If `output` is not
-    None, then it should be an open file (such as sys.stdout) or a filename (if the
-    latter it will be opened in append mode), and the average GIL load will be written
+    None, then it should be an open file (e.g sys.stdout), a filename  (which will be
+    opened in append mode), or a file descriptor. The average GIL load will be written
     to this file approximately every `output_interval` seconds. If `reset_counts` is
     `True`, then the accumulated statics from previous calls to `start()` and then
     `stop()` wil lbe cleared. If you do not clear the counts, then you can repeatedly
@@ -541,6 +542,7 @@ def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts
     global monitoring_thread
     global starting
     global _f
+    global _py_f
     global _av_sample_interval
     global _output_interval
     global _close_file_on_stop
@@ -564,7 +566,11 @@ def start(av_sample_interval=0.005, output_interval=5, output=None, reset_counts
         _close_file_on_stop = 0
 
     if output is not None:
-        _f = fdopen(output.fileno(), 'a')
+        if isinstance(output, int):
+            _f = fdopen(output, 'a')
+        else:
+            _f = fdopen(output.fileno(), 'a')
+            _py_f = output # hold a reference to stop it closing when out of scope
     else:
         _f = NULL
 
@@ -591,6 +597,7 @@ def stop():
     `gil_load.get()`."""
     global monitoring_thread
     global stopping
+    global _py_f
     with lock:
         # Tell the monitoring thread to stop and then wait for it to confirm:
         pthread_mutex_lock(&mutex)
@@ -602,6 +609,8 @@ def stop():
 
     if _close_file_on_stop:
         fclose(_f)
+    _py_f = None # pyfile, if any, can be garbage-collected now
+
 
 def get():
     """Returns a 2-tuple:

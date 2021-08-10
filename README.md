@@ -171,8 +171,8 @@ The interval between sampling times is exponentially distributed with mean set b
 `av_sample_interval`. Over time, statistics are accumulated for what proportion of the
 time the GIL was held. Overall load, as well as 1 minute, 5 minute, and 15 minute
 exponential moving averages are computed. If `output` is not None, then it should be an
-open file (such as sys.stdout) or a filename (if the latter it will be opened in append
-mode), and the average GIL load will be written to this file approximately every
+open file (e.g sys.stdout), a filename  (which will be opened in append mode), or a file
+descriptor. The average GIL load will be written to this file approximately every
 `output_interval` seconds. If `reset_counts` is `True`, then the accumulated statics
 from previous calls to `start()` and then `stop()` wil lbe cleared. If you do not clear
 the counts, then you can repeatedly sample the GIL usage of just a small segment of your
