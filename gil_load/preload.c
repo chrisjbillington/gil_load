@@ -186,6 +186,25 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex){
     return ret;
 }
 
+/*
+ * Since we have a fixed length table of threads that can be tracked, if the
+ * monitored application spawns many short-lived threads, we will end up
+ * exhausting all the available slots in the tracking table with dead threads.
+ *
+ * To overcome this problem, we can detect when a thread terminates, and mark
+ * its slot in the tracking table as available for reuse.
+ *
+ * There are 2 ways for a thread to terminate:
+ * 1) Explicitely calling pthread_exit()
+ * 2) Reaching the end of the thread routine
+ *
+ * To handle 1), we simply intercept pthread_exit() and unregister the thread
+ * number from there.
+ * For 2), we need to execute some code after the thread routine completed.
+ * To do this, we intercept pthread_create() such that the thread routine that
+ * gets executed is our wrapper, that calls the user-provided routine, then
+ * unregister the thread.
+ */
 void __attribute__((noreturn)) pthread_exit(void *retval);
 void pthread_exit(void *retval){
     unregister_thread();
