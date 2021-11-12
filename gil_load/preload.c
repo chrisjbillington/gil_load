@@ -30,6 +30,9 @@ static int initialised = 0;
 // blocking waiting for the GIL.
 static int threads_waiting[MAX_THREADS_TRACKED];
 static pthread_t threads[MAX_THREADS_TRACKED];
+// Array in which we store 1 if a thread is terminated. The Cython monitoring
+// thread will write zero once it has reset the counter for the terminated thread
+static int threads_terminated[MAX_THREADS_TRACKED];
 
 // Thread number reallocation table, as a circular buffer
 static int tnum_reallocation_table[MAX_THREADS_TRACKED];
@@ -62,8 +65,11 @@ static void mark_reallocatable_thread_num(int tnum){
         // reallocation table is full
         return;
     }
+    // Insert the thread number into the reallocation table
     tnum_reallocation_table[tnum_rpush_idx % MAX_THREADS_TRACKED] = tnum;
     tnum_rpush_idx++;
+    // Mark the thread as terminated for the monitoring thread
+    threads_terminated[tnum] = 1;
 }
 
 // True if there is at least one thread number in the reallocation table
@@ -262,6 +268,10 @@ pthread_t * get_threads_arr(void){
 
 int * get_threads_waiting_arr(void){
     return threads_waiting;
+}
+
+int * get_threads_terminated_arr(void){
+    return threads_terminated;
 }
 
 int get_most_recently_acquired(void){
