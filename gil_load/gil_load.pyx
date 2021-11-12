@@ -59,6 +59,7 @@ cdef extern from "preload.h":
     int set_initialised() nogil
     pthread_t * get_threads_arr() nogil
     int * get_threads_waiting_arr() nogil
+    int * get_threads_terminated_arr() nogil
     int get_most_recently_acquired() nogil
     int begin_sample() nogil
     void end_sample() nogil
@@ -149,9 +150,11 @@ cdef int stopping = 0
 cdef pthread_cond_t cond
 cdef pthread_mutex_t mutex
 
-# The arrays that store the threads and whether each is waiting for the GIL:
+# The arrays that store the threads, whether each is waiting for the GIL,
+# and if they have been terminated:
 cdef pthread_t * threads = get_threads_arr()
 cdef int * threads_waiting = get_threads_waiting_arr()
+cdef int * threads_terminated = get_threads_terminated_arr()
 
 cdef pthread_t monitoring_thread_ident = -1
 
@@ -361,6 +364,22 @@ def _run():
                     n_threads_tracked = begin_sample()
                     wait = 0
                     for i in range(n_threads_tracked):
+                        terminated = threads_terminated[i]
+                        if terminated:
+                            # Reset all counters for terminated threads
+                            thread_wait_count[i] = 0
+                            thread_held_count[i] = 0
+                            thread_wait_frac[i] = 0
+                            thread_held_frac[i] = 0
+                            thread_wait_frac_1m[i] = 0
+                            thread_held_frac_1m[i] = 0
+                            thread_wait_frac_5m[i] = 0
+                            thread_held_frac_5m[i] = 0
+                            thread_wait_frac_15m[i] = 0
+                            thread_held_frac_15m[i] = 0
+                            threads_terminated[i] = 0
+                            continue
+
                         thread_wait = threads_waiting[i]
                         if thread_wait:
                             wait = 1
